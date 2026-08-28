@@ -1,4 +1,4 @@
-
+-- Full script with HBE and hitmarker fixes
 AR2_antidetect = { disabled = 0, hooked = false }
 pcall(function()
     local ScriptError = game:GetService("ScriptContext").Error
@@ -287,7 +287,7 @@ function AR2_resetConfig()
     AR2_CFG.weapon.recoilReduction = 0
     AR2_CFG.weapon.noBulletDrop = false
     AR2_CFG.weapon.hbeOn = false
-    AR2_CFG.weapon.hbeSize = 10
+    AR2_CFG.weapon.hbeSize = 10   -- reset to new default
     AR2_CFG.magicAim.redirectChance = 100
     AR2_CFG.misc.freeze = false
     AR2_CFG.misc.infJump = false
@@ -1192,7 +1192,6 @@ function AR2_magicUpdate()
         if AR2_magicLockLine then AR2_magicLockLine.Visible = false end
     end
 end
-
 AR2_originalFireModesCache = {}
 AR2_allFireModesConn = nil
 AR2_allFireModes_table = { "Automatic", "Semiautomatic", "Burst" }
@@ -1686,11 +1685,8 @@ end
 function AR2_hbeInstallHook()
     if AR2_hbeHookInstalled then return end
     AR2_hbeHookInstalled = true
-
     local mt = getrawmetatable(game)
     local originalNC = mt.__namecall
-    local weaponCfg = AR2_CFG.weapon  -- cached reference
-    local hbeVisuals = AR2_hbeVisuals  -- cached reference
     setreadonly(mt, false)
     mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
@@ -1703,70 +1699,52 @@ function AR2_hbeInstallHook()
             end
         end
 
-        -- Fast exit — most calls are not Raycast
-        if method ~= "Raycast" or self ~= workspace then
-            return originalNC(self, ...)
-        end
-
-        if not weaponCfg.hbeOn then
-            return originalNC(self, ...)
-        end
-
-        local origin, direction, params = ...
-        if typeof(origin) ~= "Vector3" then
-            return originalNC(self, ...)
-        end
-
-        -- Skip non-bullet raycasts (origin far from player)
-        local localChar = AR2_LocalPlayer.Character
-        local root = localChar and localChar:FindFirstChild("HumanoidRootPart")
-        if not root or (origin - root.Position).Magnitude > 20 then
-            return originalNC(self, ...)
-        end
-
-        if params and typeof(params) == "RaycastParams" then
-            local filter = params.FilterDescendantsInstances
-            if filter and #filter >= 2 then
-                local hasChars = false
-                for _, inst in ipairs(filter) do
-                    if inst.Name == "Characters" and inst.ClassName == "Folder" then
-                        hasChars = true
-                        break  -- early exit
+        -- HBE Raycast interception
+        if method == "Raycast" and self == workspace and AR2_CFG.weapon.hbeOn and not AR2_checkcaller() then
+            local origin, direction, params = ...
+            if typeof(origin) == "Vector3" and params and typeof(params) == "RaycastParams" then
+                local filter = params.FilterDescendantsInstances
+                if filter and #filter >= 1 then
+                    local hasChars = false
+                    local entityCount = 0
+                    for _, inst in ipairs(filter) do
+                        if inst.Name == "Characters" and inst.ClassName == "Folder" then hasChars = true end
+                        if inst.Name == "Zombies" or inst.Name == "Corpses" or inst.Name == "Characters" then entityCount = entityCount + 1 end
+                    end
+                    if hasChars and entityCount >= 2 then
+                        local cleaned = {}
+                        for _, inst in ipairs(filter) do
+                            if inst.Name ~= "Characters" then table.insert(cleaned, inst) end
+                        end
+                        params.FilterDescendantsInstances = cleaned
                     end
                 end
-                if hasChars then
-                    local cleaned = {}
-                    for _, inst in ipairs(filter) do
-                        if inst.Name ~= "Characters" then
-                            cleaned[#cleaned + 1] = inst
+            end
+            local result = originalNC(self, ...)
+            if result and result.Instance then
+                -- HBE FIX: proximity check with multiplier 1
+                for char, fakeHead in pairs(AR2_hbeVisuals) do
+                    local hit = result.Instance
+                    local posMatch = fakeHead and fakeHead.Parent and
+                        (fakeHead.Position - result.Position).Magnitude < AR2_CFG.weapon.hbeSize
+                    if hit == fakeHead or posMatch then
+                        local realHead = char:FindFirstChild("Head")
+                        if realHead then
+                            return {
+                                Instance = realHead,
+                                Position = result.Position,
+                                Normal = result.Normal,
+                                Material = result.Material,
+                                Distance = result.Distance,
+                            }
                         end
                     end
-                    params.FilterDescendantsInstances = cleaned
                 end
             end
+            return result
         end
 
-        local result = originalNC(self, ...)
-        if result and result.Instance then
-            local hit = result.Instance
-            local sz = weaponCfg.hbeSize
-            for char, fakeHead in pairs(hbeVisuals) do
-                if hit == fakeHead or (fakeHead and fakeHead.Parent and
-                    (fakeHead.Position - result.Position).Magnitude < sz) then
-                    local realHead = char:FindFirstChild("Head")
-                    if realHead then
-                        return {
-                            Instance = realHead,
-                            Position = result.Position,
-                            Normal = result.Normal,
-                            Material = result.Material,
-                            Distance = result.Distance,
-                        }
-                    end
-                end
-            end
-        end
-        return result
+        return originalNC(self, ...)
     end)
     setreadonly(mt, true)
 
