@@ -603,10 +603,11 @@ function AR2_api.vehicles() return AR2_cached("vehicles", AR2_STATIC, function()
 
 -- CORPSE ESP FIX: scan both folders, shorter TTL
 function AR2_api.corpses()
-    return AR2_cached("corpses", 0.2, function()
+    return AR2_cached("corpses", 0.25, function()
         AR2_ORIGIN = AR2_localPosition()
         local list = {}
         local seen = {}
+        -- Primary: dedicated Corpses folder
         if AR2_Corpses then
             for _, child in ipairs(AR2_Corpses:GetChildren()) do
                 if child:IsA("Model") then
@@ -615,7 +616,8 @@ function AR2_api.corpses()
                 end
             end
         end
-        -- Also catch players mid-death or who left while dead
+        -- Secondary: Characters folder catches players mid-death
+        -- and players who disconnected before corpse was moved
         if AR2_Characters then
             for _, child in ipairs(AR2_Characters:GetChildren()) do
                 if child:IsA("Model") and not seen[child]
@@ -623,7 +625,10 @@ function AR2_api.corpses()
                     local hum = child:FindFirstChildWhichIsA("Humanoid")
                     if hum and hum.Health <= 0 then
                         local e = AR2_buildCorpse(child)
-                        if e then e.kind = "corpse" list[#list+1] = e end
+                        if e then
+                            e.kind = "corpse"
+                            list[#list+1] = e
+                        end
                     end
                 end
             end
@@ -1741,14 +1746,14 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                 AR2_addTracer(origin, direction)
             end
 
-            -- Hitmarker detection
+            -- Hitmarker: raycast along bullet path to detect character hit
             if AR2_CFG.hitmarker.enabled then
                 local rp = RaycastParams.new()
                 rp.FilterType = Enum.RaycastFilterType.Exclude
                 rp.FilterDescendantsInstances = { AR2_LocalPlayer.Character }
-                local hit = AR2_Workspace:Raycast(origin, direction * 2000, rp)
-                if hit and hit.Instance then
-                    local model = hit.Instance
+                local hmHit = AR2_Workspace:Raycast(origin, direction * 2000, rp)
+                if hmHit and hmHit.Instance then
+                    local model = hmHit.Instance
                     while model and not model:IsA("Model") do model = model.Parent end
                     if model then
                         local isChar = (AR2_Characters and model.Parent == AR2_Characters)
@@ -1875,8 +1880,7 @@ function AR2_hbeInstallHook()
     mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
 
-        -- Hitmarker from Bullet Impact remote (not needed since fire hook raycasts)
-        -- But we can keep for any additional remote triggers
+        -- Hitmarker from Bullet Impact remote (optional, kept for redundancy)
         if method == "FireServer" and AR2_CFG.hitmarker.enabled then
             local args = {...}
             if args[1] == "Bullet Impact" then
@@ -1884,27 +1888,31 @@ function AR2_hbeInstallHook()
             end
         end
 
-        -- HBE Raycast interception (only when firing flag is true)
+        -- HBE: only fires during actual bullet fire (flag set in AR2_Bullets.Fire)
         if method == "Raycast" and self == workspace
            and AR2_CFG.weapon.hbeOn and AR2_bulletFiringFlag then
 
             local origin, direction, params = ...
 
+            -- Hard type guard: game's CastWithWhiteList passes wrong types, skip those
             if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3"
                or not params or typeof(params) ~= "RaycastParams" then
                 return originalNC(self, ...)
             end
 
+            -- Strip Characters folder so fake hitboxes are reachable
             local filter = params.FilterDescendantsInstances
             if filter then
                 local cleaned = {}
                 for _, inst in ipairs(filter) do
-                    if typeof(inst) == "Instance" then
-                        local isCharsFolder = inst == AR2_Characters
-                            or (pcall(function() return inst:IsA("Folder") end) and inst.Name == "Characters" and inst.Parent == workspace)
-                        if not isCharsFolder then
-                            cleaned[#cleaned + 1] = inst
-                        end
+                    local isCharsFolder = false
+                    pcall(function()
+                        isCharsFolder = inst == AR2_Characters
+                            or (inst:IsA("Folder") and inst.Name == "Characters"
+                                and inst.Parent == workspace)
+                    end)
+                    if not isCharsFolder then
+                        cleaned[#cleaned + 1] = inst
                     end
                 end
                 params.FilterDescendantsInstances = cleaned
@@ -4412,9 +4420,9 @@ if WindUI then
         if WindUI.Themes then
             local t = WindUI.Themes["Dark"] or WindUI.Themes.Dark
             if t then
-                t.Accent = Color3.fromRGB(210, 80, 255)      -- purple-pink
-                -- t.Accent = Color3.fromRGB(80, 150, 255)   -- blue
-                -- t.Accent = Color3.fromRGB(255, 80, 180)   -- hot pink
+                t.Accent = Color3.fromRGB(210, 80, 255)      -- purple-pink blend
+                -- For pure blue:  Color3.fromRGB(80, 150, 255)
+                -- For pure pink:  Color3.fromRGB(255, 80, 180)
             end
         end
     end)
@@ -4429,7 +4437,7 @@ if WindUI then
         MaxSize = Vector2.new(1000, 800),
         ToggleKey = Enum.KeyCode.P,
         Theme = "Dark",
-        Accent = Color3.fromRGB(210, 80, 255),  -- purple-pink
+        Accent = Color3.fromRGB(210, 80, 255),  -- purple-pink blend
         Resizable = true,
         SideBarWidth = 180,
         Transparent = true,
