@@ -80,7 +80,7 @@ AR2_CFG = {
         requireADS = true,      -- only fires while right-click is held
         protection = false,     -- auto-shoot anyone within radius, no FOV needed
         protectionRadius = 50,
-        ignoreFov = false,      -- targets by 3D distance, shoots anyone in maxDist including behind
+        ignoreFov = false,      -- (deprecated, now always distance-based)
     },
     weapon = {
         noRecoil = false,
@@ -613,25 +613,19 @@ function AR2_api.corpses()
             for _, child in ipairs(AR2_Corpses:GetChildren()) do
                 if child:IsA("Model") then
                     local e = AR2_buildCorpse(child)
-                    if e then
-                        list[#list+1] = e
-                        seen[child] = true
-                    end
+                    if e then list[#list+1] = e seen[child] = true end
                 end
             end
         end
-        -- Secondary: Characters folder — catches dead players before the
-        -- game moves them to Corpses, and players who disconnected while dead.
+        -- Also catch players mid-death or who left while dead
         if AR2_Characters then
             for _, child in ipairs(AR2_Characters:GetChildren()) do
-                if child:IsA("Model") and child ~= AR2_LocalPlayer.Character and not seen[child] then
+                if child:IsA("Model") and not seen[child]
+                   and child ~= AR2_LocalPlayer.Character then
                     local hum = child:FindFirstChildWhichIsA("Humanoid")
                     if hum and hum.Health <= 0 then
                         local e = AR2_buildCorpse(child)
-                        if e then
-                            e.kind = "corpse"
-                            list[#list+1] = e
-                        end
+                        if e then e.kind = "corpse" list[#list+1] = e end
                     end
                 end
             end
@@ -782,7 +776,7 @@ function AR2_applyChams(model, color)
         AR2_ensureChamsFolder()
         h = Instance.new("Highlight")
         h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        h.FillTransparency, h.OutlineTransparency = 0.55, 0
+        h.FillTransparency, h.OutlineTransparency = 1, 0   -- outline only
         h.Parent = AR2_chamsFolder
         AR2_chamsPool[AR2_chamsSlot] = h
     end
@@ -1578,45 +1572,54 @@ AR2_showHitmarker = function()
     local cfg = AR2_CFG.hitmarker
     local cam = workspace.CurrentCamera
     if not cam then return end
-    local cx = cam.ViewportSize.X / 2
-    local cy = cam.ViewportSize.Y / 2
+    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
     local color = Color3.fromHSV(cfg.colorHue / 360, 1, 1)
     local s = cfg.size
     local drawings = {}
 
     if cfg.shape == "Cross" then
-        for _, pts in ipairs({
-            {Vector2.new(cx-s, cy-s), Vector2.new(cx+s, cy+s)},
-            {Vector2.new(cx-s, cy+s), Vector2.new(cx+s, cy-s)},
-        }) do
+        local coords = {
+            {center + Vector2.new(-s, -s), center + Vector2.new(s,  s)},
+            {center + Vector2.new(-s,  s), center + Vector2.new(s, -s)},
+        }
+        for _, pts in ipairs(coords) do
             local l = Drawing.new("Line")
             l.From, l.To = pts[1], pts[2]
-            l.Color, l.Thickness, l.Transparency, l.Visible = color, 2, 1, true
+            l.Color = color
+            l.Thickness = 2
+            l.Transparency = 1
+            l.Visible = true
             drawings[#drawings+1] = l
         end
     elseif cfg.shape == "Dot" then
         local c = Drawing.new("Circle")
-        c.Position = Vector2.new(cx, cy)
+        c.Position = center
         c.Radius = math.max(2, s / 3)
-        c.Color, c.Filled, c.Transparency, c.Visible = color, true, 1, true
+        c.Color = color
+        c.Filled = true
+        c.Transparency = 1
+        c.Visible = true
         drawings[1] = c
     elseif cfg.shape == "Square" then
         local sq = Drawing.new("Square")
-        sq.Position = Vector2.new(cx - s, cy - s)
+        sq.Position = center - Vector2.new(s, s)
         sq.Size = Vector2.new(s * 2, s * 2)
-        sq.Color, sq.Filled, sq.Thickness, sq.Transparency, sq.Visible = color, false, 2, 1, true
+        sq.Color = color
+        sq.Filled = false
+        sq.Thickness = 2
+        sq.Transparency = 1
+        sq.Visible = true
         drawings[1] = sq
     end
 
-    -- Sound
-    local ids = {
+    local soundIds = {
         Hit  = "rbxassetid://9118817318",
         Ding = "rbxassetid://4612402584",
         Pop  = "rbxassetid://5801257793",
     }
-    if cfg.sound ~= "None" and ids[cfg.sound] then
+    if cfg.sound ~= "None" and soundIds[cfg.sound] then
         local snd = Instance.new("Sound")
-        snd.SoundId = ids[cfg.sound]
+        snd.SoundId = soundIds[cfg.sound]
         snd.Volume = math.clamp((AR2_CFG.misc.hitSoundVolume or 70) / 100, 0, 1)
         snd.Parent = cam
         snd:Play()
@@ -1624,7 +1627,9 @@ AR2_showHitmarker = function()
     end
 
     task.delay(cfg.duration, function()
-        for _, d in ipairs(drawings) do pcall(function() d:Remove() end) end
+        for _, d in ipairs(drawings) do
+            pcall(function() d:Remove() end)
+        end
     end)
 end
 
@@ -1880,51 +1885,52 @@ function AR2_hbeInstallHook()
         -- HBE Raycast interception
         if method == "Raycast" and self == workspace and AR2_CFG.weapon.hbeOn then
             local origin, direction, params = ...
-            -- typeof guards first — non-vector calls exit instantly
-            if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" then
+
+            -- Hard gate: only intercept proper RaycastParams calls.
+            -- Game's CastWithWhiteList passes a table — let it pass through untouched.
+            if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3"
+               or not params or typeof(params) ~= "RaycastParams" then
                 return originalNC(self, ...)
             end
 
-            -- Gate 1: bullet rays are long (20+ studs). Camera collision is 2-15 studs.
-            if direction.Magnitude < 20 then
-                return originalNC(self, ...)
-            end
-
-            -- Gate 2: bullet origin is within 10 studs of player root.
-            -- Camera position can be anywhere — this excludes it.
-            local localChar = AR2_LocalPlayer.Character
-            local root = localChar and localChar:FindFirstChild("HumanoidRootPart")
-            if not root or (origin - root.Position).Magnitude > 10 then
-                return originalNC(self, ...)
-            end
-
-            -- Both gates passed — this is a bullet ray. Strip Characters folder.
-            if params and typeof(params) == "RaycastParams" then
-                local filter = params.FilterDescendantsInstances
-                if filter and #filter > 0 then
+            -- Identify bullet raycasts by checking for the Characters folder in filter.
+            -- Camera raycasts never include it. Old-style table raycasts don't reach here.
+            local filter = params.FilterDescendantsInstances
+            if filter and #filter >= 1 then
+                local isLikelyBullet = false
+                for _, inst in ipairs(filter) do
+                    if typeof(inst) == "Instance" then
+                        if inst == AR2_Characters or
+                           (inst:IsA("Folder") and inst.Name == "Characters"
+                            and inst.Parent == workspace) then
+                            isLikelyBullet = true
+                            break
+                        end
+                    end
+                end
+                if isLikelyBullet then
                     local cleaned = {}
                     for _, inst in ipairs(filter) do
-                        -- typeof guard prevents crash if filter has non-Instance entries
-                        local isCharsFolder = typeof(inst) == "Instance"
-                            and (inst == AR2_Characters
-                                or (pcall(function() inst:IsA("Folder") end)
-                                    and inst.Name == "Characters"
-                                    and inst.Parent == workspace))
-                        if not isCharsFolder then
+                        if typeof(inst) == "Instance"
+                           and inst ~= AR2_Characters
+                           and not (inst:IsA("Folder") and inst.Name == "Characters"
+                                    and inst.Parent == workspace) then
                             cleaned[#cleaned + 1] = inst
                         end
                     end
-                    if #cleaned ~= #filter then
-                        params.FilterDescendantsInstances = cleaned
-                    end
+                    params.FilterDescendantsInstances = cleaned
                 end
             end
 
-            local result = originalNC(self, ...)
+            -- pcall so any remaining edge cases don't spam console
+            local ok, result = pcall(originalNC, self, ...)
+            if not ok then return nil end
+
             if result and result.Instance then
                 for char, fakeHead in pairs(AR2_hbeVisuals) do
                     if fakeHead and fakeHead.Parent then
-                        local posMatch = (fakeHead.Position - result.Position).Magnitude < AR2_CFG.weapon.hbeSize * 0.75
+                        local posMatch = (fakeHead.Position - result.Position).Magnitude
+                            < AR2_CFG.weapon.hbeSize * 0.75
                         if result.Instance == fakeHead or posMatch then
                             local realHead = char:FindFirstChild("Head")
                             if realHead then
@@ -3078,7 +3084,6 @@ local AR2_rageBotHolding = false
 
 local function AR2_rageBotTarget()
     local c = AR2_CFG.rageBot
-    local cam = Workspace.CurrentCamera
 
     -- Protection mode: nearest player in radius, ignores FOV entirely
     if c.protection then
@@ -3093,39 +3098,18 @@ local function AR2_rageBotTarget()
             end
         end
         if best then return best end
-        -- Fall through to normal FOV check if nothing in radius
+        -- Fall through to distance-based selection if no one in radius
     end
 
     local pool = {}
     if c.players then for _, e in ipairs(AR2_api.players()) do pool[#pool+1] = e end end
     if c.zombies then for _, e in ipairs(AR2_api.zombies()) do pool[#pool+1] = e end end
 
-    if c.ignoreFov then
-        -- 3D distance only — no screen check, catches players behind you
-        local best, bestDist = nil, c.maxDist
-        for _, entity in ipairs(pool) do
-            if entity.distance < bestDist then
-                best, bestDist = entity, entity.distance
-            end
-        end
-        return best
-    end
-
-    -- Normal mode: closest to crosshair inside FOV
-    local centre = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-    local best, bestScore = nil, c.fov
+    -- Always use 3D distance — 360 degree, no screen check, respects maxDist slider
+    local best, bestDist = nil, c.maxDist
     for _, entity in ipairs(pool) do
-        if entity.distance <= c.maxDist then
-            local part = entity.headCollider or entity.head or entity.torso or entity.root
-            if part then
-                local screenPos, onScreen = cam:WorldToViewportPoint(part.Position)
-                if onScreen and screenPos.Z > 0 then
-                    local score = (centre - Vector2.new(screenPos.X, screenPos.Y)).Magnitude
-                    if score < bestScore then
-                        best, bestScore = entity, score
-                    end
-                end
-            end
+        if entity.distance < bestDist then
+            best, bestDist = entity, entity.distance
         end
     end
     return best
@@ -4435,6 +4419,18 @@ AR2_UI_ELEMENTS = {}
 
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 if WindUI then
+    -- Set accent color before building the window
+    pcall(function()
+        if WindUI.Themes then
+            local t = WindUI.Themes["Dark"] or WindUI.Themes.Dark
+            if t then
+                t.Accent = Color3.fromRGB(210, 80, 255)      -- purple-pink
+                -- t.Accent = Color3.fromRGB(80, 150, 255)   -- blue
+                -- t.Accent = Color3.fromRGB(255, 80, 180)   -- hot pink
+            end
+        end
+    end)
+
     local Window = WindUI:CreateWindow({
         Title = "7177 Scripts",
         Icon = "sword",
@@ -4445,14 +4441,14 @@ if WindUI then
         MaxSize = Vector2.new(1000, 800),
         ToggleKey = Enum.KeyCode.P,
         Theme = "Dark",
-        AccentColor = Color3.fromRGB(180, 80, 255),  -- purple-pink
+        Accent = Color3.fromRGB(210, 80, 255),  -- purple-pink
         Resizable = true,
         SideBarWidth = 180,
         Transparent = true,
     })
-    -- Fallback accent setter for different WindUI versions
-    pcall(function() WindUI:SetAccentColor(Color3.fromRGB(180, 80, 255)) end)
-    pcall(function() WindUI.AccentColor = Color3.fromRGB(180, 80, 255) end)
+    -- Fallback accent setter
+    pcall(function() WindUI:SetAccentColor(Color3.fromRGB(210, 80, 255)) end)
+    pcall(function() WindUI.AccentColor = Color3.fromRGB(210, 80, 255) end)
 
     local function getPlayerNames()
         local names = {"None"}
@@ -4590,7 +4586,6 @@ if WindUI then
     end)
     addToggle(rageBotSection, "Target Players", AR2_CFG.rageBot, "players")
     addToggle(rageBotSection, "Target Zombies", AR2_CFG.rageBot, "zombies")
-    addSlider(rageBotSection, "FOV", AR2_CFG.rageBot, "fov", 20, 800)
     addSlider(rageBotSection, "Max Distance", AR2_CFG.rageBot, "maxDist", 100, 3000)
     addToggle(rageBotSection, "Require ADS (Right Click)", AR2_CFG.rageBot, "requireADS", function(v)
         AR2_CFG.rageBot.requireADS = v
@@ -4599,9 +4594,6 @@ if WindUI then
         AR2_CFG.rageBot.protection = v
     end)
     addSlider(rageBotSection, "Protection Radius", AR2_CFG.rageBot, "protectionRadius", 10, 200)
-    addToggle(rageBotSection, "Ignore FOV (360 degree)", AR2_CFG.rageBot, "ignoreFov", function(v)
-        AR2_CFG.rageBot.ignoreFov = v
-    end)
 
     local weaponModsSection = combatTab:Section({ Title = "Weapon Mods", Box = false })
     addToggle(weaponModsSection, "No Spread", AR2_CFG.weapon, "noSpread")
@@ -4894,7 +4886,6 @@ if WindUI then
     hbeHelp:Button({ Title = "Rage Bot — auto holds left click when someone is in your FOV", Callback = function() end })
     hbeHelp:Button({ Title = "ADS Mode — rage bot only fires while you right click. Safer", Callback = function() end })
     hbeHelp:Button({ Title = "Protection — shoots anyone within the set radius, behind you too", Callback = function() end })
-    hbeHelp:Button({ Title = "Ignore FOV — targets nearest player by distance, not by screen position", Callback = function() end })
     hbeHelp:Button({ Title = "No Spread — all bullets go exactly where aimed. No random spread", Callback = function() end })
     hbeHelp:Button({ Title = "Instant Reload — pressing reload finishes instantly. Re-toggles after death", Callback = function() end })
     hbeHelp:Button({ Title = "All Fire Modes — lets any gun fire on automatic", Callback = function() end })
