@@ -77,10 +77,10 @@ AR2_CFG = {
         maxDist = 1200,
         players = true,
         zombies = false,
-        requireADS = true,
-        protection = false,
+        requireADS = true,      -- only fires while right-click is held
+        protection = false,     -- auto-shoot anyone within radius, no FOV needed
         protectionRadius = 50,
-        ignoreFov = false,
+        ignoreFov = false,      -- targets by 3D distance, shoots anyone in maxDist including behind
     },
     weapon = {
         noRecoil = false,
@@ -89,7 +89,7 @@ AR2_CFG = {
         allFireModes = false,
         instantReload = false,
         recoilReduction = 0,
-        noBulletDrop = false,   -- ADD THIS
+        noBulletDrop = false,   -- per-shot gravity zero
         hbeOn = false,
         hbeSize = 10,
     },
@@ -609,8 +609,6 @@ function AR2_api.corpses()
         AR2_ORIGIN = AR2_localPosition()
         local list = {}
         local seen = {}
-
-        -- Primary: Corpses folder
         if AR2_Corpses then
             for _, child in ipairs(AR2_Corpses:GetChildren()) do
                 if child:IsA("Model") then
@@ -622,7 +620,6 @@ function AR2_api.corpses()
                 end
             end
         end
-
         -- Secondary: Characters folder — catches dead players before the
         -- game moves them to Corpses, and players who disconnected while dead.
         if AR2_Characters then
@@ -639,7 +636,6 @@ function AR2_api.corpses()
                 end
             end
         end
-
         table.sort(list, function(a, b) return a.distance < b.distance end)
         return list
     end)
@@ -1423,7 +1419,7 @@ local function AR2_instantReloadOnEquip()
     end)
 end
 
--- Declare watch variables as globals
+-- Declare watch variables
 AR2_reloadWatchConn = nil
 AR2_reloadWatchLast = 0
 
@@ -1582,17 +1578,17 @@ AR2_showHitmarker = function()
     local cfg = AR2_CFG.hitmarker
     local cam = workspace.CurrentCamera
     if not cam then return end
-    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    local cx = cam.ViewportSize.X / 2
+    local cy = cam.ViewportSize.Y / 2
     local color = Color3.fromHSV(cfg.colorHue / 360, 1, 1)
     local s = cfg.size
     local drawings = {}
 
     if cfg.shape == "Cross" then
-        local coords = {
-            {center + Vector2.new(-s, -s), center + Vector2.new(s,  s)},
-            {center + Vector2.new(-s,  s), center + Vector2.new(s, -s)},
-        }
-        for _, pts in ipairs(coords) do
+        for _, pts in ipairs({
+            {Vector2.new(cx-s, cy-s), Vector2.new(cx+s, cy+s)},
+            {Vector2.new(cx-s, cy+s), Vector2.new(cx+s, cy-s)},
+        }) do
             local l = Drawing.new("Line")
             l.From, l.To = pts[1], pts[2]
             l.Color, l.Thickness, l.Transparency, l.Visible = color, 2, 1, true
@@ -1600,27 +1596,28 @@ AR2_showHitmarker = function()
         end
     elseif cfg.shape == "Dot" then
         local c = Drawing.new("Circle")
-        c.Position, c.Radius = center, math.max(2, s / 3)
+        c.Position = Vector2.new(cx, cy)
+        c.Radius = math.max(2, s / 3)
         c.Color, c.Filled, c.Transparency, c.Visible = color, true, 1, true
         drawings[1] = c
     elseif cfg.shape == "Square" then
         local sq = Drawing.new("Square")
-        sq.Position = center - Vector2.new(s, s)
+        sq.Position = Vector2.new(cx - s, cy - s)
         sq.Size = Vector2.new(s * 2, s * 2)
         sq.Color, sq.Filled, sq.Thickness, sq.Transparency, sq.Visible = color, false, 2, 1, true
         drawings[1] = sq
     end
 
     -- Sound
-    local soundIds = {
+    local ids = {
         Hit  = "rbxassetid://9118817318",
         Ding = "rbxassetid://4612402584",
         Pop  = "rbxassetid://5801257793",
     }
-    if cfg.sound ~= "None" and soundIds[cfg.sound] then
+    if cfg.sound ~= "None" and ids[cfg.sound] then
         local snd = Instance.new("Sound")
-        snd.SoundId = soundIds[cfg.sound]
-        snd.Volume = math.clamp(AR2_CFG.misc.hitSoundVolume / 100, 0, 1)
+        snd.SoundId = ids[cfg.sound]
+        snd.Volume = math.clamp((AR2_CFG.misc.hitSoundVolume or 70) / 100, 0, 1)
         snd.Parent = cam
         snd:Play()
         game:GetService("Debris"):AddItem(snd, 2)
@@ -1883,50 +1880,62 @@ function AR2_hbeInstallHook()
         -- HBE Raycast interception
         if method == "Raycast" and self == workspace and AR2_CFG.weapon.hbeOn then
             local origin, direction, params = ...
-            if typeof(origin) == "Vector3" and params and typeof(params) == "RaycastParams" then
+            -- typeof guards first — non-vector calls exit instantly
+            if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" then
+                return originalNC(self, ...)
+            end
+
+            -- Gate 1: bullet rays are long (20+ studs). Camera collision is 2-15 studs.
+            if direction.Magnitude < 20 then
+                return originalNC(self, ...)
+            end
+
+            -- Gate 2: bullet origin is within 10 studs of player root.
+            -- Camera position can be anywhere — this excludes it.
+            local localChar = AR2_LocalPlayer.Character
+            local root = localChar and localChar:FindFirstChild("HumanoidRootPart")
+            if not root or (origin - root.Position).Magnitude > 10 then
+                return originalNC(self, ...)
+            end
+
+            -- Both gates passed — this is a bullet ray. Strip Characters folder.
+            if params and typeof(params) == "RaycastParams" then
                 local filter = params.FilterDescendantsInstances
-                if filter and #filter >= 1 then
-                    -- Match either exact reference OR workspace-parented Characters folder.
-                    local isLikelyBullet = false
+                if filter and #filter > 0 then
+                    local cleaned = {}
                     for _, inst in ipairs(filter) do
-                        if inst == AR2_Characters or
-                           (typeof(inst) == "Instance" and inst:IsA("Folder")
-                            and inst.Name == "Characters"
-                            and inst.Parent == workspace) then
-                            isLikelyBullet = true
-                            break
+                        -- typeof guard prevents crash if filter has non-Instance entries
+                        local isCharsFolder = typeof(inst) == "Instance"
+                            and (inst == AR2_Characters
+                                or (pcall(function() inst:IsA("Folder") end)
+                                    and inst.Name == "Characters"
+                                    and inst.Parent == workspace))
+                        if not isCharsFolder then
+                            cleaned[#cleaned + 1] = inst
                         end
                     end
-                    if isLikelyBullet then
-                        local cleaned = {}
-                        for _, inst in ipairs(filter) do
-                            if inst ~= AR2_Characters and
-                               not (typeof(inst) == "Instance" and inst:IsA("Folder")
-                                    and inst.Name == "Characters"
-                                    and inst.Parent == workspace) then
-                                cleaned[#cleaned + 1] = inst
-                            end
-                        end
+                    if #cleaned ~= #filter then
                         params.FilterDescendantsInstances = cleaned
                     end
                 end
             end
+
             local result = originalNC(self, ...)
             if result and result.Instance then
                 for char, fakeHead in pairs(AR2_hbeVisuals) do
-                    local hit = result.Instance
-                    local posMatch = fakeHead and fakeHead.Parent and
-                        (fakeHead.Position - result.Position).Magnitude < AR2_CFG.weapon.hbeSize * 0.75
-                    if hit == fakeHead or posMatch then
-                        local realHead = char:FindFirstChild("Head")
-                        if realHead then
-                            return {
-                                Instance = realHead,
-                                Position = result.Position,
-                                Normal = result.Normal,
-                                Material = result.Material,
-                                Distance = result.Distance,
-                            }
+                    if fakeHead and fakeHead.Parent then
+                        local posMatch = (fakeHead.Position - result.Position).Magnitude < AR2_CFG.weapon.hbeSize * 0.75
+                        if result.Instance == fakeHead or posMatch then
+                            local realHead = char:FindFirstChild("Head")
+                            if realHead then
+                                return {
+                                    Instance = realHead,
+                                    Position = result.Position,
+                                    Normal   = result.Normal,
+                                    Material = result.Material,
+                                    Distance = result.Distance,
+                                }
+                            end
                         end
                     end
                 end
@@ -4436,11 +4445,14 @@ if WindUI then
         MaxSize = Vector2.new(1000, 800),
         ToggleKey = Enum.KeyCode.P,
         Theme = "Dark",
-        Accent = Color3.fromRGB(210, 80, 255),  -- purple-pink accent; change to Color3.fromRGB(80,160,255) for blue, (255,80,180) for pink
+        AccentColor = Color3.fromRGB(180, 80, 255),  -- purple-pink
         Resizable = true,
         SideBarWidth = 180,
         Transparent = true,
     })
+    -- Fallback accent setter for different WindUI versions
+    pcall(function() WindUI:SetAccentColor(Color3.fromRGB(180, 80, 255)) end)
+    pcall(function() WindUI.AccentColor = Color3.fromRGB(180, 80, 255) end)
 
     local function getPlayerNames()
         local names = {"None"}
@@ -4674,9 +4686,6 @@ if WindUI then
 
     local mapTPSection = teleportTab:Section({ Title = "Map TP", Box = false })
     mapTPSection:Button({ Title = "Open Map", Callback = function() AR2_tp.toggleMap(true) end })
-
-    -- No Clip TP section removed per request
-    -- No Clip TP section removed per request
 
     local waypointSection = teleportTab:Section({ Title = "Waypoints", Box = false })
     waypointSection:Button({ Title = "Save Spot", Callback = function() AR2_tp.saveWaypoint() end })
@@ -5133,17 +5142,28 @@ function AR2_setPersonalGun(enabled, mode, hue, gray, materialStr, rainbow)
         end
         local function applyColor(color)
             for _, descendant in ipairs(gun:GetDescendants()) do
-                if descendant:IsA("BasePart") and not descendant:IsA("Attachment") and not descendant.Name:lower():find("scope") then
-                    if not personalGunOriginal[descendant] then
-                        personalGunOriginal[descendant] = { Color = descendant.Color, Material = descendant.Material, Transparency = descendant.Transparency }
+                if descendant:IsA("BasePart") then
+                    -- Skip scope/sight parts — they need to stay transparent
+                    local n = descendant.Name:lower()
+                    local isSight = n:find("scope") or n:find("sight") or n:find("lens")
+                        or n:find("glass") or n:find("reticle") or n:find("window")
+                        or n:find("dot") or n:find("optic")
+                    -- Also skip originally-transparent parts (scope lenses etc)
+                    local origT = personalGunOriginal[descendant]
+                        and personalGunOriginal[descendant].Transparency
+                        or descendant.Transparency
+                    if not isSight and origT < 0.8 then
+                        if not personalGunOriginal[descendant] then
+                            personalGunOriginal[descendant] = {
+                                Color = descendant.Color,
+                                Material = descendant.Material,
+                                Transparency = descendant.Transparency
+                            }
+                        end
+                        descendant.Material = material
+                        descendant.Transparency = material == Enum.Material.ForceField and 0.5 or 0
+                        descendant.Color = color
                     end
-                    descendant.Material = material
-                    if material == Enum.Material.ForceField then
-                        descendant.Transparency = 0.5
-                    else
-                        descendant.Transparency = 0
-                    end
-                    descendant.Color = color
                 end
             end
         end
