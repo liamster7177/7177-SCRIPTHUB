@@ -77,10 +77,10 @@ AR2_CFG = {
         maxDist = 1200,
         players = true,
         zombies = false,
-        requireADS = true,      -- only fires while right-click is held
-        protection = false,     -- auto-shoot anyone within radius, no FOV needed
+        requireADS = true,
+        protection = false,
         protectionRadius = 50,
-        ignoreFov = false,      -- targets by 3D distance, shoots anyone in maxDist including behind
+        ignoreFov = false,
     },
     weapon = {
         noRecoil = false,
@@ -91,7 +91,7 @@ AR2_CFG = {
         recoilReduction = 0,
         noBulletDrop = false,   -- ADD THIS
         hbeOn = false,
-        hbeSize = 10,   -- increased default for better range effectiveness
+        hbeSize = 10,
     },
     visuals = { fullbright = false, nofog = false, setTime = false, brightness = 3, time = 14, skybox = "Default" },
     car = { fuel = false, boost = false, god = false, speed = 120, torque = 3, allCars = false, method = "desync" },
@@ -141,6 +141,27 @@ AR2_CFG = {
         gap = 5,
         shape = "Cross",
         rainbow = false,
+    },
+    keybinds = {
+        playerESP      = "None",
+        zombieESP      = "None",
+        lootESP        = "None",
+        silentAim      = "None",
+        rageBot        = "None",
+        hbe            = "None",
+        speedHack      = "None",
+        infJump        = "None",
+        noclip         = "None",
+        freezeZombies  = "None",
+        fullbright     = "None",
+        noSpread       = "None",
+        noBulletDrop   = "None",
+        instantReload  = "None",
+        allFireModes   = "None",
+        wallbang       = "None",
+        protection     = "None",
+        crosshair      = "None",
+        tracers        = "None",
     },
 }
 
@@ -581,7 +602,48 @@ end
 
 function AR2_api.zombies() return AR2_cached("zombies", AR2_FRESH, function() AR2_ORIGIN = AR2_localPosition() return AR2_collect(AR2_Zombies, AR2_buildZombie) end) end
 function AR2_api.vehicles() return AR2_cached("vehicles", AR2_STATIC, function() AR2_ORIGIN = AR2_localPosition() return AR2_collect(AR2_Vehicles, AR2_buildVehicle) end) end
-function AR2_api.corpses() return AR2_cached("corpses", AR2_STATIC, function() AR2_ORIGIN = AR2_localPosition() return AR2_collect(AR2_Corpses, AR2_buildCorpse) end) end
+
+-- CORPSE ESP FIX: scan both folders, shorter TTL
+function AR2_api.corpses()
+    return AR2_cached("corpses", 0.2, function()
+        AR2_ORIGIN = AR2_localPosition()
+        local list = {}
+        local seen = {}
+
+        -- Primary: Corpses folder
+        if AR2_Corpses then
+            for _, child in ipairs(AR2_Corpses:GetChildren()) do
+                if child:IsA("Model") then
+                    local e = AR2_buildCorpse(child)
+                    if e then
+                        list[#list+1] = e
+                        seen[child] = true
+                    end
+                end
+            end
+        end
+
+        -- Secondary: Characters folder — catches dead players before the
+        -- game moves them to Corpses, and players who disconnected while dead.
+        if AR2_Characters then
+            for _, child in ipairs(AR2_Characters:GetChildren()) do
+                if child:IsA("Model") and child ~= AR2_LocalPlayer.Character and not seen[child] then
+                    local hum = child:FindFirstChildWhichIsA("Humanoid")
+                    if hum and hum.Health <= 0 then
+                        local e = AR2_buildCorpse(child)
+                        if e then
+                            e.kind = "corpse"
+                            list[#list+1] = e
+                        end
+                    end
+                end
+            end
+        end
+
+        table.sort(list, function(a, b) return a.distance < b.distance end)
+        return list
+    end)
+end
 
 function AR2_api.loot(radius, filter)
     radius = radius or 1500
@@ -1412,22 +1474,25 @@ function setInstantReloadEnabled(enabled)
     end
 end
 
--- waits until pc.Character matches the actual new character, then re-hooks
+-- waits until character is alive, then re-hooks. No reference comparison.
 local function AR2_reloadRespawnSetup(newChar)
     task.spawn(function()
-        local deadline = os.clock() + 12  -- give it 12s max
+        local deadline = os.clock() + 15
         while os.clock() < deadline do
             if not AR2_instantReloadEnabled then return end
-            local pc = AR2_getPlayerClass()
-            if pc and pc.Character == newChar then
-                -- module caught up — safe to hook now
+            -- Wait for character to actually be alive, not just spawned
+            local hum = newChar:FindFirstChildWhichIsA("Humanoid")
+            if hum and hum.Health > 0 and newChar:FindFirstChild("HumanoidRootPart") then
+                -- Character is live. Wait 2s for the game module to catch up.
+                task.wait(2)
+                if not AR2_instantReloadEnabled then return end
                 AR2_instantReloadHook()
                 AR2_instantReloadOnEquip()
                 return
             end
-            task.wait(0.5)
+            task.wait(0.25)
         end
-        -- fallback: hook anyway and hope for the best
+        -- 15s timeout fallback
         if AR2_instantReloadEnabled then
             AR2_instantReloadHook()
             AR2_instantReloadOnEquip()
@@ -1749,16 +1814,15 @@ function AR2_hbeInstallHook()
             if typeof(origin) == "Vector3" and params and typeof(params) == "RaycastParams" then
                 local filter = params.FilterDescendantsInstances
                 if filter and #filter >= 1 then
-                    -- Bullet raycasts always include the local character in the filter.
-                    -- Camera/other raycasts don't. Use that as the identifier.
-                    local localChar = AR2_LocalPlayer.Character
-                    local isBulletRay = false
-                    if localChar then
-                        for _, inst in ipairs(filter) do
-                            if inst == localChar then isBulletRay = true break end
+                    -- Exact reference check. Bullet raycasts filter AR2_Characters.
+                    local isLikelyBullet = false
+                    for _, inst in ipairs(filter) do
+                        if inst == AR2_Characters then
+                            isLikelyBullet = true
+                            break
                         end
                     end
-                    if isBulletRay then
+                    if isLikelyBullet then
                         local cleaned = {}
                         for _, inst in ipairs(filter) do
                             if inst ~= AR2_Characters then
@@ -4182,6 +4246,103 @@ function AR2_toggleCrosshair(enabled)
     end)
 end
 
+-- KEYBIND SYSTEM
+AR2_keybindActions = {}
+
+function AR2_registerKeybind(name, toggleFn)
+    AR2_keybindActions[name] = toggleFn
+end
+
+local function AR2_fireKeybind(keyName)
+    for feature, key in pairs(AR2_CFG.keybinds) do
+        if key ~= "None" and key == keyName then
+            local action = AR2_keybindActions[feature]
+            if action then pcall(action) end
+        end
+    end
+end
+
+AR2_UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    local keyName
+    if input.UserInputType == Enum.UserInputType.MouseButton3 then
+        keyName = "MouseButton3"
+    else
+        keyName = input.KeyCode.Name
+    end
+    AR2_fireKeybind(keyName)
+end)
+
+local function AR2_registerAllKeybinds()
+    AR2_registerKeybind("playerESP", function()
+        AR2_CFG.players.on = not AR2_CFG.players.on
+        AR2_esp.update()
+    end)
+    AR2_registerKeybind("zombieESP", function()
+        AR2_CFG.zombies.on = not AR2_CFG.zombies.on
+        AR2_esp.update()
+    end)
+    AR2_registerKeybind("lootESP", function()
+        AR2_CFG.loot.on = not AR2_CFG.loot.on
+        AR2_esp.update()
+    end)
+    AR2_registerKeybind("silentAim", function()
+        AR2_CFG.magicAim.on = not AR2_CFG.magicAim.on
+        AR2_magicUpdate()
+    end)
+    AR2_registerKeybind("rageBot", function()
+        AR2_rageBotSetEnabled(not AR2_CFG.rageBot.on)
+    end)
+    AR2_registerKeybind("hbe", function()
+        AR2_hbeSetEnabled(not AR2_CFG.weapon.hbeOn)
+    end)
+    AR2_registerKeybind("speedHack", function()
+        AR2_CFG.speed.on = not AR2_CFG.speed.on
+        if AR2_CFG.speed.on then AR2_speed.start() else AR2_speed.stop() end
+    end)
+    AR2_registerKeybind("infJump", function()
+        AR2_CFG.misc.infJump = not AR2_CFG.misc.infJump
+        if AR2_CFG.misc.infJump then AR2_startInfJump() else AR2_stopInfJump() end
+    end)
+    AR2_registerKeybind("noclip", function()
+        AR2_toggleNoclip(not AR2_CFG.misc.noclip)
+    end)
+    AR2_registerKeybind("freezeZombies", function()
+        AR2_CFG.misc.freeze = not AR2_CFG.misc.freeze
+        if AR2_CFG.misc.freeze then AR2_freeze.start() else AR2_freeze.stop() end
+    end)
+    AR2_registerKeybind("fullbright", function()
+        AR2_CFG.visuals.fullbright = not AR2_CFG.visuals.fullbright
+        AR2_visuals.apply()
+    end)
+    AR2_registerKeybind("noSpread", function()
+        AR2_CFG.weapon.noSpread = not AR2_CFG.weapon.noSpread
+    end)
+    AR2_registerKeybind("noBulletDrop", function()
+        AR2_CFG.weapon.noBulletDrop = not AR2_CFG.weapon.noBulletDrop
+    end)
+    AR2_registerKeybind("instantReload", function()
+        setInstantReloadEnabled(not AR2_instantReloadEnabled)
+    end)
+    AR2_registerKeybind("allFireModes", function()
+        AR2_applyAllFireModes(not AR2_CFG.weapon.allFireModes)
+    end)
+    AR2_registerKeybind("wallbang", function()
+        AR2_CFG.weapon.wallbang = not AR2_CFG.weapon.wallbang
+        if AR2_CFG.weapon.wallbang then startWallbangTagging() else stopWallbangTagging() end
+    end)
+    AR2_registerKeybind("protection", function()
+        AR2_CFG.rageBot.protection = not AR2_CFG.rageBot.protection
+    end)
+    AR2_registerKeybind("crosshair", function()
+        AR2_toggleCrosshair(not AR2_CFG.crosshair.enabled)
+    end)
+    AR2_registerKeybind("tracers", function()
+        AR2_CFG.misc.tracers = not AR2_CFG.misc.tracers
+        AR2_tracersUpdate()
+    end)
+end
+
 -- UI
 AR2_UI_ELEMENTS = {}
 
@@ -4600,20 +4761,92 @@ if WindUI then
     end })
     settingsSection:Button({ Title = "Reset To Default (All Off)", Callback = function() AR2_resetConfig() end })
 
+    -- Keybinds Tab
+    local KEYBIND_KEYS = {
+        "None",
+        "Q","E","R","F","G","Z","X","C","V","B","N","M",
+        "1","2","3","4","5","6","7","8","9","0",
+        "F1","F2","F3","F4","F5","F6","F7","F8","F9","F10","F11","F12",
+        "LeftAlt","RightAlt","Tab","CapsLock","LeftShift","RightShift",
+        "Insert","Delete","Home","End","PageUp","PageDown",
+        "Up","Down","Left","Right","MouseButton3",
+    }
+
+    local keybindsTab = Window:Tab({ Title = "Keybinds", Icon = "keyboard" })
+
+    local espKbSection = keybindsTab:Section({ Title = "ESP", Box = false })
+    addDropdown(espKbSection, "Player ESP", KEYBIND_KEYS, AR2_CFG.keybinds, "playerESP", function(v) AR2_CFG.keybinds.playerESP = v end)
+    addDropdown(espKbSection, "Zombie ESP", KEYBIND_KEYS, AR2_CFG.keybinds, "zombieESP", function(v) AR2_CFG.keybinds.zombieESP = v end)
+    addDropdown(espKbSection, "Loot ESP", KEYBIND_KEYS, AR2_CFG.keybinds, "lootESP", function(v) AR2_CFG.keybinds.lootESP = v end)
+
+    local combatKbSection = keybindsTab:Section({ Title = "Combat", Box = false })
+    addDropdown(combatKbSection, "Silent Aim", KEYBIND_KEYS, AR2_CFG.keybinds, "silentAim", function(v) AR2_CFG.keybinds.silentAim = v end)
+    addDropdown(combatKbSection, "Rage Bot", KEYBIND_KEYS, AR2_CFG.keybinds, "rageBot", function(v) AR2_CFG.keybinds.rageBot = v end)
+    addDropdown(combatKbSection, "Protection Mode", KEYBIND_KEYS, AR2_CFG.keybinds, "protection", function(v) AR2_CFG.keybinds.protection = v end)
+    addDropdown(combatKbSection, "HBE", KEYBIND_KEYS, AR2_CFG.keybinds, "hbe", function(v) AR2_CFG.keybinds.hbe = v end)
+    addDropdown(combatKbSection, "No Spread", KEYBIND_KEYS, AR2_CFG.keybinds, "noSpread", function(v) AR2_CFG.keybinds.noSpread = v end)
+    addDropdown(combatKbSection, "No Bullet Drop", KEYBIND_KEYS, AR2_CFG.keybinds, "noBulletDrop", function(v) AR2_CFG.keybinds.noBulletDrop = v end)
+    addDropdown(combatKbSection, "Instant Reload", KEYBIND_KEYS, AR2_CFG.keybinds, "instantReload", function(v) AR2_CFG.keybinds.instantReload = v end)
+    addDropdown(combatKbSection, "All Fire Modes", KEYBIND_KEYS, AR2_CFG.keybinds, "allFireModes", function(v) AR2_CFG.keybinds.allFireModes = v end)
+    addDropdown(combatKbSection, "Wallbang", KEYBIND_KEYS, AR2_CFG.keybinds, "wallbang", function(v) AR2_CFG.keybinds.wallbang = v end)
+    addDropdown(combatKbSection, "Tracers", KEYBIND_KEYS, AR2_CFG.keybinds, "tracers", function(v) AR2_CFG.keybinds.tracers = v end)
+    addDropdown(combatKbSection, "Crosshair", KEYBIND_KEYS, AR2_CFG.keybinds, "crosshair", function(v) AR2_CFG.keybinds.crosshair = v end)
+
+    local movementKbSection = keybindsTab:Section({ Title = "Movement", Box = false })
+    addDropdown(movementKbSection, "Speed Hack", KEYBIND_KEYS, AR2_CFG.keybinds, "speedHack", function(v) AR2_CFG.keybinds.speedHack = v end)
+    addDropdown(movementKbSection, "Inf Jump", KEYBIND_KEYS, AR2_CFG.keybinds, "infJump", function(v) AR2_CFG.keybinds.infJump = v end)
+    addDropdown(movementKbSection, "Noclip", KEYBIND_KEYS, AR2_CFG.keybinds, "noclip", function(v) AR2_CFG.keybinds.noclip = v end)
+
+    local miscKbSection = keybindsTab:Section({ Title = "Misc", Box = false })
+    addDropdown(miscKbSection, "Freeze Zombies", KEYBIND_KEYS, AR2_CFG.keybinds, "freezeZombies", function(v) AR2_CFG.keybinds.freezeZombies = v end)
+    addDropdown(miscKbSection, "Fullbright", KEYBIND_KEYS, AR2_CFG.keybinds, "fullbright", function(v) AR2_CFG.keybinds.fullbright = v end)
+
     -- Help Tab
     local helpTab = Window:Tab({ Title = "Help", Icon = "info" })
-    local keysSection = helpTab:Section({ Title = "Keybinds", Box = false })
-    keysSection:Button({ Title = "T  —  Click TP (when enabled)", Callback = function() end })
-    keysSection:Button({ Title = "Y  —  TP to target player", Callback = function() end })
-    keysSection:Button({ Title = "L  —  Open map TP", Callback = function() end })
-    keysSection:Button({ Title = "H  —  Car to cursor", Callback = function() end })
-    keysSection:Button({ Title = "P  —  Toggle menu", Callback = function() end })
 
-    local notesSection = helpTab:Section({ Title = "Notes", Box = false })
-    notesSection:Button({ Title = "Silent aim: Magic Aim ON + players/zombies toggled", Callback = function() end })
-    notesSection:Button({ Title = "HBE: works best paired with silent aim", Callback = function() end })
-    notesSection:Button({ Title = "Rage bot: needs mouse1press on your executor", Callback = function() end })
-    notesSection:Button({ Title = "Protection mode: ignores FOV, shoots anyone in radius", Callback = function() end })
+    local keybindsSectionHelp = helpTab:Section({ Title = "Keybinds", Box = false })
+    keybindsSectionHelp:Button({ Title = "T  ——  Click TP to cursor  (enable Click TP toggle first)", Callback = function() end })
+    keybindsSectionHelp:Button({ Title = "Y  ——  TP to selected player  (pick target in Teleport tab)", Callback = function() end })
+    keybindsSectionHelp:Button({ Title = "L  ——  Open map TP  (enable Map TP toggle first)", Callback = function() end })
+    keybindsSectionHelp:Button({ Title = "H  ——  Teleport car to cursor position", Callback = function() end })
+    keybindsSectionHelp:Button({ Title = "P  ——  Toggle this menu open/closed", Callback = function() end })
+    keybindsSectionHelp:Button({ Title = "WASD + Space / Ctrl  ——  Move while Noclip is active", Callback = function() end })
+
+    local espHelpSection = helpTab:Section({ Title = "ESP", Box = false })
+    espHelpSection:Button({ Title = "Player ESP: draws boxes and names over other players", Callback = function() end })
+    espHelpSection:Button({ Title = "Armed Color: orange = player holding a weapon, red = unarmed", Callback = function() end })
+    espHelpSection:Button({ Title = "Chams: shows players through walls with colored highlight", Callback = function() end })
+    espHelpSection:Button({ Title = "Loot ESP: color = item rarity tier. Min Rank 0 shows everything", Callback = function() end })
+    espHelpSection:Button({ Title = "Corpse ESP: shows dead player bodies. Scans both Corpses + Characters folders", Callback = function() end })
+
+    local combatHelpSection = helpTab:Section({ Title = "Combat", Box = false })
+    combatHelpSection:Button({ Title = "Silent Aim: bends bullets toward nearest target in FOV. Needs Magic Aim ON", Callback = function() end })
+    combatHelpSection:Button({ Title = "Silent Aim players/zombies toggle: controls WHAT it targets", Callback = function() end })
+    combatHelpSection:Button({ Title = "HBE (Hitbox Expander): spawns large head hitbox on enemies. Works with silent aim", Callback = function() end })
+    combatHelpSection:Button({ Title = "Rage Bot: auto holds left click when target in FOV. Needs mouse1press support", Callback = function() end })
+    combatHelpSection:Button({ Title = "Rage Bot + ADS: only fires while you hold right click (aim down sights)", Callback = function() end })
+    combatHelpSection:Button({ Title = "Protection Mode: rage bot shoots anyone in radius regardless of FOV direction", Callback = function() end })
+    combatHelpSection:Button({ Title = "Ignore FOV: rage bot targets by 3D distance only, including behind you", Callback = function() end })
+    combatHelpSection:Button({ Title = "No Spread: removes bullet spread. Shots go exactly where aimed", Callback = function() end })
+    combatHelpSection:Button({ Title = "No Bullet Drop: zeroes gravity during fire call so bullets fly flat", Callback = function() end })
+    combatHelpSection:Button({ Title = "Instant Reload: sends reload network packets immediately on reload key", Callback = function() end })
+    combatHelpSection:Button({ Title = "All Fire Modes: unlocks automatic fire on semi-auto and burst weapons", Callback = function() end })
+    combatHelpSection:Button({ Title = "Wallbang: bullets penetrate all geometry. Combine with HBE for wall kills", Callback = function() end })
+
+    local tpHelpSection = helpTab:Section({ Title = "Teleport", Box = false })
+    tpHelpSection:Button({ Title = "Click TP: enable toggle, then press T to TP to cursor ground position", Callback = function() end })
+    tpHelpSection:Button({ Title = "Map TP: enable toggle, press L to open map, click destination to TP there", Callback = function() end })
+    tpHelpSection:Button({ Title = "Player TP: pick a target in dropdown, press Y or click TP to Target button", Callback = function() end })
+    tpHelpSection:Button({ Title = "Car TP: H key or buttons to move nearest vehicle to cursor or your position", Callback = function() end })
+
+    local miscHelpSection = helpTab:Section({ Title = "Misc", Box = false })
+    miscHelpSection:Button({ Title = "Speed Hack: adds extra velocity on top of normal movement. Pulse = stutter to avoid kick", Callback = function() end })
+    miscHelpSection:Button({ Title = "Inf Jump: Space teleports you 15 studs up mid-air for repeated jumping", Callback = function() end })
+    miscHelpSection:Button({ Title = "Noclip: anchors nearby terrain and moves you through it. WASD + Space/Ctrl", Callback = function() end })
+    miscHelpSection:Button({ Title = "Freeze Zombies: anchors zombies in place. Whole Server = all zombies on map", Callback = function() end })
+    miscHelpSection:Button({ Title = "Radar: overlays colored dots on the in-game map. Open game map first", Callback = function() end })
+    miscHelpSection:Button({ Title = "Fullbright: removes ambient darkness. Does not affect other players visually", Callback = function() end })
+    miscHelpSection:Button({ Title = "Player Outlines: draws visible highlight on all player characters", Callback = function() end })
 
     WindUI:Notify({ Title = "7177 Scripts", Content = "Loaded", Duration = 5 })
 
@@ -4901,6 +5134,8 @@ if AR2_CFG.hitmarker.enabled then AR2_toggleHitmarker(true) end
 if AR2_CFG.crosshair.enabled then AR2_toggleCrosshair(true) end
 if AR2_CFG.tp.respawnTP then AR2_toggleRespawnTP(true) end
 if AR2_CFG.weapon.hbeOn then AR2_hbeSetEnabled(true) end
+
+AR2_registerAllKeybinds()
 
 function AR2_unload()
     AR2_esp.destroy()
