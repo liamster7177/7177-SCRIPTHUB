@@ -1519,10 +1519,12 @@ if AR2_LocalPlayer.Character then
     end
 end
 
--- Wallbang (one-time full scan)
+-- Wallbang (one-time full scan with collision group forcing)
 local wallbangTagConn = nil
 local CharactersFolder = AR2_Workspace:WaitForChild("Characters", 5)
 local ZombiesFolder = AR2_Workspace:WaitForChild("Zombies", 5)
+local AR2_wallbangGroupSaved = {}
+local AR2_WALLBANG_GROUPS = { [7]=true, [8]=true, [9]=true, [11]=true, [17]=true }
 
 local function isCharacterPart(part)
     local parent = part.Parent
@@ -1548,14 +1550,36 @@ local function removeCharacterTags(model)
     end
 end
 
+local function AR2_wallbangForceGroup(desc)
+    if not desc:IsA("BasePart") then return end
+    if isCharacterPart(desc) then return end
+    local gid = desc.CollisionGroupId
+    if AR2_WALLBANG_GROUPS[gid] then
+        AR2_wallbangGroupSaved[desc] = gid
+        pcall(function() desc.CollisionGroupId = 0 end)
+    end
+    tagPart(desc)
+end
+
 function startWallbangTagging()
     if wallbangTagConn then return end
+
+    -- Tag all non-character parts and fix map geometry groups
     for _, part in ipairs(AR2_Workspace:GetDescendants()) do
-        tagPart(part)
+        AR2_wallbangForceGroup(part)
     end
+
+    -- Explicit Map folder pass for grouped geometry
+    local mapFolder = AR2_Workspace:FindFirstChild("Map")
+    if mapFolder then
+        for _, desc in ipairs(mapFolder:GetDescendants()) do
+            AR2_wallbangForceGroup(desc)
+        end
+    end
+
     wallbangTagConn = AR2_Workspace.DescendantAdded:Connect(function(desc)
         if desc:IsA("BasePart") then
-            tagPart(desc)
+            AR2_wallbangForceGroup(desc)
         elseif desc:IsA("Humanoid") then
             local model = desc.Parent
             if model and model:IsA("Model") then removeCharacterTags(model) end
@@ -1564,75 +1588,94 @@ function startWallbangTagging()
 end
 
 function stopWallbangTagging()
-    if wallbangTagConn then wallbangTagConn:Disconnect() wallbangTagConn = nil end
+    if wallbangTagConn then
+        wallbangTagConn:Disconnect()
+        wallbangTagConn = nil
+    end
+    -- Restore saved collision group IDs
+    for part, gid in pairs(AR2_wallbangGroupSaved) do
+        pcall(function()
+            if part and part.Parent then
+                part.CollisionGroupId = gid
+            end
+        end)
+    end
+    AR2_wallbangGroupSaved = {}
 end
 
 -- Bullet firing flag for HBE
 AR2_bulletFiringFlag = false
 
--- Hitmarker full implementation
+-- Hitmarker full implementation (single definition)
 AR2_showHitmarker = function()
     if not AR2_CFG.hitmarker.enabled then return end
     if not AR2_hasDrawing then return end
     local cfg = AR2_CFG.hitmarker
     local cam = workspace.CurrentCamera
     if not cam then return end
-    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    local cx = cam.ViewportSize.X / 2
+    local cy = cam.ViewportSize.Y / 2
     local color = Color3.fromHSV(cfg.colorHue / 360, 1, 1)
     local s = cfg.size
-    local drawings = {}
 
+    local drawings = {}
     if cfg.shape == "Cross" then
         local coords = {
-            {center + Vector2.new(-s, -s), center + Vector2.new(s,  s)},
-            {center + Vector2.new(-s,  s), center + Vector2.new(s, -s)},
+            {Vector2.new(cx - s, cy - s), Vector2.new(cx + s, cy + s)},
+            {Vector2.new(cx - s, cy + s), Vector2.new(cx + s, cy - s)},
         }
         for _, pts in ipairs(coords) do
             local l = Drawing.new("Line")
-            l.From, l.To = pts[1], pts[2]
-            l.Color = color
-            l.Thickness = 2
+            l.Visible      = true
+            l.Color        = color
+            l.Thickness    = 2
             l.Transparency = 1
-            l.Visible = true
-            drawings[#drawings+1] = l
+            l.From         = pts[1]
+            l.To           = pts[2]
+            drawings[#drawings + 1] = l
         end
     elseif cfg.shape == "Dot" then
         local c = Drawing.new("Circle")
-        c.Position = center
-        c.Radius = math.max(2, s / 3)
-        c.Color = color
-        c.Filled = true
+        c.Visible      = true
+        c.Color        = color
+        c.Radius       = math.max(3, s / 3)
+        c.Filled       = true
         c.Transparency = 1
-        c.Visible = true
+        c.Position     = Vector2.new(cx, cy)
         drawings[1] = c
     elseif cfg.shape == "Square" then
         local sq = Drawing.new("Square")
-        sq.Position = center - Vector2.new(s, s)
-        sq.Size = Vector2.new(s * 2, s * 2)
-        sq.Color = color
-        sq.Filled = false
-        sq.Thickness = 2
+        sq.Visible      = true
+        sq.Color        = color
+        sq.Filled       = false
+        sq.Thickness    = 2
         sq.Transparency = 1
-        sq.Visible = true
+        sq.Position     = Vector2.new(cx - s, cy - s)
+        sq.Size         = Vector2.new(s * 2, s * 2)
         drawings[1] = sq
     end
 
     local soundIds = {
-        Hit  = "rbxassetid://9118817318",
-        Ding = "rbxassetid://4612402584",
-        Pop  = "rbxassetid://5801257793",
+        Hit  = "rbxassetid://4612402584",
+        Ding = "rbxassetid://6042583150",
+        Pop  = "rbxassetid://4612402584",
     }
     if cfg.sound ~= "None" and soundIds[cfg.sound] then
-        local snd = Instance.new("Sound")
-        snd.SoundId = soundIds[cfg.sound]
-        snd.Volume = math.clamp((AR2_CFG.misc.hitSoundVolume or 70) / 100, 0, 1)
-        snd.Parent = cam
-        snd:Play()
-        game:GetService("Debris"):AddItem(snd, 2)
+        pcall(function()
+            local snd = Instance.new("Sound")
+            snd.SoundId = soundIds[cfg.sound]
+            snd.Volume  = math.clamp((AR2_CFG.misc.hitSoundVolume or 70) / 100, 0, 1)
+            snd.RollOffMaxDistance = 0
+            snd.Parent  = cam
+            snd:Play()
+            game:GetService("Debris"):AddItem(snd, 2)
+        end)
     end
 
-    task.delay(cfg.duration, function()
-        for _, d in ipairs(drawings) do pcall(function() d:Remove() end) end
+    task.delay(math.max(cfg.duration, 0.05), function()
+        for _, d in ipairs(drawings) do
+            pcall(function() d:Remove() end)
+        end
     end)
 end
 
@@ -1746,7 +1789,7 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                 AR2_addTracer(origin, direction)
             end
 
-            -- Hitmarker: raycast along bullet path to detect character hit
+            -- Hitmarker detection
             if AR2_CFG.hitmarker.enabled then
                 local rp = RaycastParams.new()
                 rp.FilterType = Enum.RaycastFilterType.Exclude
@@ -1788,7 +1831,6 @@ local function AR2_hbeAddVisual(character)
     local realHead = character:FindFirstChild("Head")
     if not realHead then return end
 
-    -- Check 2000-stud radius from local player
     local localRoot = AR2_localPosition()
     local charRoot = character:FindFirstChild("HumanoidRootPart") or realHead
     if not charRoot then return end
@@ -1819,7 +1861,6 @@ local function AR2_hbeAddVisual(character)
     weld.Parent = v
     AR2_hbeVisuals[character] = v
 
-    -- Wallbang tag management
     AR2_RunService.Heartbeat:Connect(function()
         if not v or not v.Parent then return end
         if AR2_CFG.weapon.wallbang then
@@ -1880,7 +1921,7 @@ function AR2_hbeInstallHook()
     mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
 
-        -- Hitmarker from Bullet Impact remote (optional, kept for redundancy)
+        -- Hitmarker from Bullet Impact remote (optional)
         if method == "FireServer" and AR2_CFG.hitmarker.enabled then
             local args = {...}
             if args[1] == "Bullet Impact" then
@@ -1888,46 +1929,36 @@ function AR2_hbeInstallHook()
             end
         end
 
-        -- HBE: only fires during actual bullet fire (flag set in AR2_Bullets.Fire)
+        -- HBE: only during actual bullet fire
         if method == "Raycast" and self == workspace
            and AR2_CFG.weapon.hbeOn and AR2_bulletFiringFlag then
-
             local origin, direction, params = ...
-
-            -- Hard type guard: game's CastWithWhiteList passes wrong types, skip those
             if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3"
                or not params or typeof(params) ~= "RaycastParams" then
                 return originalNC(self, ...)
             end
-
-            -- Strip Characters folder so fake hitboxes are reachable
             local filter = params.FilterDescendantsInstances
             if filter then
                 local cleaned = {}
                 for _, inst in ipairs(filter) do
-                    local isCharsFolder = false
+                    local skip = false
                     pcall(function()
-                        isCharsFolder = inst == AR2_Characters
+                        skip = inst == AR2_Characters
                             or (inst:IsA("Folder") and inst.Name == "Characters"
                                 and inst.Parent == workspace)
                     end)
-                    if not isCharsFolder then
-                        cleaned[#cleaned + 1] = inst
-                    end
+                    if not skip then cleaned[#cleaned + 1] = inst end
                 end
                 params.FilterDescendantsInstances = cleaned
             end
-
             local ok, result = pcall(originalNC, self, ...)
             if not ok or not result then return nil end
-
             if result.Instance then
                 for char, fakeHead in pairs(AR2_hbeVisuals) do
                     if fakeHead and fakeHead.Parent then
-                        local hitFake = result.Instance == fakeHead
-                        local posFake = (fakeHead.Position - result.Position).Magnitude
-                            < AR2_CFG.weapon.hbeSize * 0.75
-                        if hitFake or posFake then
+                        if result.Instance == fakeHead or
+                           (fakeHead.Position - result.Position).Magnitude
+                           < AR2_CFG.weapon.hbeSize * 0.75 then
                             local realHead = char:FindFirstChild("Head")
                             if realHead then
                                 return {
@@ -3326,7 +3357,6 @@ AR2_ORIG = {
     AtmosphereDensity = (AR2_atmosphere() and AR2_atmosphere().Density) or nil,
 }
 
--- New post-processing snapshot
 local AR2_origColorCorrection = nil
 local AR2_addedColorCorrection = false
 local AR2_origBloom = nil
