@@ -1361,9 +1361,9 @@ local function AR2_instantReloadOnEquip()
     end)
 end
 
--- Declare watch variables
-local AR2_reloadWatchConn = nil
-local AR2_reloadWatchLast = 0
+-- Declare watch variables as globals
+AR2_reloadWatchConn = nil
+AR2_reloadWatchLast = 0
 
 function setInstantReloadEnabled(enabled)
     AR2_instantReloadEnabled = enabled
@@ -1749,7 +1749,8 @@ function AR2_hbeInstallHook()
             if typeof(origin) == "Vector3" and params and typeof(params) == "RaycastParams" then
                 local filter = params.FilterDescendantsInstances
                 if filter and #filter >= 1 then
-                    -- Only intercept bullet raycasts: local character must be in filter
+                    -- Bullet raycasts always include the local character in the filter.
+                    -- Camera/other raycasts don't. Use that as the identifier.
                     local localChar = AR2_LocalPlayer.Character
                     local isBulletRay = false
                     if localChar then
@@ -4211,24 +4212,21 @@ if WindUI then
         table.insert(AR2_UI_ELEMENTS, elem)
     end
 
-    local function addToggle(tab, label, tbl, key, callback)
+    local function addToggle(tab, label, cfgTable, cfgKey, callback)
         local element = tab:Toggle({
             Title = label,
-            Value = tbl[key],
+            Value = cfgTable[cfgKey],
             Callback = function(v)
-                tbl[key] = v
+                cfgTable[cfgKey] = v
+                callback(v)
                 AR2_markDirty()
-                if callback then callback(v) end
             end,
         })
-        storeElement({
-            getter = function() return tbl[key] end,
-            setter = function(val) element:Set(val) end
-        })
+        storeElement({ getter = function() return cfgTable[cfgKey] end, setter = function(val) element:Set(val) end })
         return element
     end
 
-    local function addSlider(tab, label, tbl, key, min, max, stepOrOnChange, onChange)
+    local function addSlider(tab, label, cfgTable, cfgKey, min, max, stepOrOnChange, onChange)
         local step = 1
         local callback = onChange
         if type(stepOrOnChange) == "function" then
@@ -4239,36 +4237,36 @@ if WindUI then
         local element = tab:Slider({
             Title = label,
             Step  = step,
-            Value = { Min = math.floor(min), Max = math.floor(max), Default = math.floor(tbl[key] or min) },
+            Value = { Min = math.floor(min), Max = math.floor(max), Default = math.floor(cfgTable[cfgKey] or min) },
             Callback = function(value)
                 local v = tonumber(value)
                 if v then
-                    tbl[key] = math.floor(v)
+                    cfgTable[cfgKey] = math.floor(v)
                     AR2_markDirty()
                     if callback then callback(math.floor(v)) end
                 end
             end,
         })
         storeElement({
-            getter = function() return tbl[key] end,
+            getter = function() return cfgTable[cfgKey] end,
             setter = function(val) element:Set(val) end
         })
         return element
     end
 
-    local function addDropdown(tab, label, options, tbl, key, callback)
+    local function addDropdown(tab, label, options, cfgTable, cfgKey, callback)
         local element = tab:Dropdown({
             Title = label,
             Values = options,
-            Value = tbl[key],
+            Value = cfgTable[cfgKey],
             Callback = function(v)
-                tbl[key] = v
+                cfgTable[cfgKey] = v
+                callback(v)
                 AR2_markDirty()
-                if callback then callback(v) end
             end,
         })
         storeElement({
-            getter = function() return tbl[key] end,
+            getter = function() return cfgTable[cfgKey] end,
             setter = function(val) element:Set(val) end
         })
         return element
@@ -4605,19 +4603,17 @@ if WindUI then
     -- Help Tab
     local helpTab = Window:Tab({ Title = "Help", Icon = "info" })
     local keysSection = helpTab:Section({ Title = "Keybinds", Box = false })
-    keysSection:Label({ Title = "T — Click TP (when enabled)" })
-    keysSection:Label({ Title = "Y — TP to target player" })
-    keysSection:Label({ Title = "L — Open map TP" })
-    keysSection:Label({ Title = "H — Car to cursor" })
-    keysSection:Label({ Title = "P — Toggle menu" })
-    keysSection:Label({ Title = "G — Noclip (WASD + Space/Ctrl)" })
+    keysSection:Button({ Title = "T  —  Click TP (when enabled)", Callback = function() end })
+    keysSection:Button({ Title = "Y  —  TP to target player", Callback = function() end })
+    keysSection:Button({ Title = "L  —  Open map TP", Callback = function() end })
+    keysSection:Button({ Title = "H  —  Car to cursor", Callback = function() end })
+    keysSection:Button({ Title = "P  —  Toggle menu", Callback = function() end })
 
     local notesSection = helpTab:Section({ Title = "Notes", Box = false })
-    notesSection:Label({ Title = "Silent aim requires Magic Aim ON + players/zombies toggled" })
-    notesSection:Label({ Title = "HBE works best with silent aim enabled" })
-    notesSection:Label({ Title = "Rage bot needs mouse1press support on your executor" })
-    notesSection:Label({ Title = "Protection mode ignores FOV — shoots anyone in radius" })
-    notesSection:Label({ Title = "No bullet drop: only zero-gravity during fire call" })
+    notesSection:Button({ Title = "Silent aim: Magic Aim ON + players/zombies toggled", Callback = function() end })
+    notesSection:Button({ Title = "HBE: works best paired with silent aim", Callback = function() end })
+    notesSection:Button({ Title = "Rage bot: needs mouse1press on your executor", Callback = function() end })
+    notesSection:Button({ Title = "Protection mode: ignores FOV, shoots anyone in radius", Callback = function() end })
 
     WindUI:Notify({ Title = "7177 Scripts", Content = "Loaded", Duration = 5 })
 
