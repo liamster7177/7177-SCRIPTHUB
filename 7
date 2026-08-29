@@ -73,14 +73,12 @@ AR2_CFG = {
     magicBullet = { searchRadius = 10, forwardNudge = 1 },
     rageBot = {
         on = false,
-        fov = 250,
         maxDist = 1200,
         players = true,
         zombies = false,
-        requireADS = true,      -- only fires while right-click is held
-        protection = false,     -- auto-shoot anyone within radius, no FOV needed
+        requireADS = true,
+        protection = false,
         protectionRadius = 50,
-        ignoreFov = false,      -- (deprecated, now always distance-based)
     },
     weapon = {
         noRecoil = false,
@@ -89,7 +87,7 @@ AR2_CFG = {
         allFireModes = false,
         instantReload = false,
         recoilReduction = 0,
-        noBulletDrop = false,   -- per-shot gravity zero
+        noBulletDrop = false,
         hbeOn = false,
         hbeSize = 10,
     },
@@ -1564,8 +1562,10 @@ function stopWallbangTagging()
     if wallbangTagConn then wallbangTagConn:Disconnect() wallbangTagConn = nil end
 end
 
--- Bullet fire hook with hitmarker raycast
--- HITMARKER — full implementation
+-- Bullet firing flag for HBE
+AR2_bulletFiringFlag = false
+
+-- Hitmarker full implementation
 AR2_showHitmarker = function()
     if not AR2_CFG.hitmarker.enabled then return end
     if not AR2_hasDrawing then return end
@@ -1627,9 +1627,7 @@ AR2_showHitmarker = function()
     end
 
     task.delay(cfg.duration, function()
-        for _, d in ipairs(drawings) do
-            pcall(function() d:Remove() end)
-        end
+        for _, d in ipairs(drawings) do pcall(function() d:Remove() end) end
     end)
 end
 
@@ -1727,6 +1725,7 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                 end)
             end
 
+            AR2_bulletFiringFlag = true
             local result
             if AR2_CFG.weapon.noBulletDrop then
                 local savedGravity = workspace.Gravity
@@ -1736,12 +1735,13 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
             else
                 result = AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
             end
+            AR2_bulletFiringFlag = false
 
             if AR2_tracersEnabled then
                 AR2_addTracer(origin, direction)
             end
 
-            -- Hitmarker: raycast along bullet path to check for character hit
+            -- Hitmarker detection
             if AR2_CFG.hitmarker.enabled then
                 local rp = RaycastParams.new()
                 rp.FilterType = Enum.RaycastFilterType.Exclude
@@ -1762,6 +1762,7 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
             return result
         end)
         if not ok then
+            AR2_bulletFiringFlag = false
             warn("[fire] hook error: " .. tostring(result))
             return AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
         end
@@ -1874,7 +1875,8 @@ function AR2_hbeInstallHook()
     mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
 
-        -- Hitmarker from Bullet Impact remote
+        -- Hitmarker from Bullet Impact remote (not needed since fire hook raycasts)
+        -- But we can keep for any additional remote triggers
         if method == "FireServer" and AR2_CFG.hitmarker.enabled then
             local args = {...}
             if args[1] == "Bullet Impact" then
@@ -1882,56 +1884,42 @@ function AR2_hbeInstallHook()
             end
         end
 
-        -- HBE Raycast interception
-        if method == "Raycast" and self == workspace and AR2_CFG.weapon.hbeOn then
+        -- HBE Raycast interception (only when firing flag is true)
+        if method == "Raycast" and self == workspace
+           and AR2_CFG.weapon.hbeOn and AR2_bulletFiringFlag then
+
             local origin, direction, params = ...
 
-            -- Hard gate: only intercept proper RaycastParams calls.
-            -- Game's CastWithWhiteList passes a table — let it pass through untouched.
             if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3"
                or not params or typeof(params) ~= "RaycastParams" then
                 return originalNC(self, ...)
             end
 
-            -- Identify bullet raycasts by checking for the Characters folder in filter.
-            -- Camera raycasts never include it. Old-style table raycasts don't reach here.
             local filter = params.FilterDescendantsInstances
-            if filter and #filter >= 1 then
-                local isLikelyBullet = false
+            if filter then
+                local cleaned = {}
                 for _, inst in ipairs(filter) do
                     if typeof(inst) == "Instance" then
-                        if inst == AR2_Characters or
-                           (inst:IsA("Folder") and inst.Name == "Characters"
-                            and inst.Parent == workspace) then
-                            isLikelyBullet = true
-                            break
-                        end
-                    end
-                end
-                if isLikelyBullet then
-                    local cleaned = {}
-                    for _, inst in ipairs(filter) do
-                        if typeof(inst) == "Instance"
-                           and inst ~= AR2_Characters
-                           and not (inst:IsA("Folder") and inst.Name == "Characters"
-                                    and inst.Parent == workspace) then
+                        local isCharsFolder = inst == AR2_Characters
+                            or (pcall(function() return inst:IsA("Folder") end) and inst.Name == "Characters" and inst.Parent == workspace)
+                        if not isCharsFolder then
                             cleaned[#cleaned + 1] = inst
                         end
                     end
-                    params.FilterDescendantsInstances = cleaned
                 end
+                params.FilterDescendantsInstances = cleaned
             end
 
-            -- pcall so any remaining edge cases don't spam console
             local ok, result = pcall(originalNC, self, ...)
-            if not ok then return nil end
+            if not ok or not result then return nil end
 
-            if result and result.Instance then
+            if result.Instance then
                 for char, fakeHead in pairs(AR2_hbeVisuals) do
                     if fakeHead and fakeHead.Parent then
-                        local posMatch = (fakeHead.Position - result.Position).Magnitude
+                        local hitFake = result.Instance == fakeHead
+                        local posFake = (fakeHead.Position - result.Position).Magnitude
                             < AR2_CFG.weapon.hbeSize * 0.75
-                        if result.Instance == fakeHead or posMatch then
+                        if hitFake or posFake then
                             local realHead = char:FindFirstChild("Head")
                             if realHead then
                                 return {
