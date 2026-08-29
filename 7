@@ -1575,7 +1575,61 @@ function stopWallbangTagging()
 end
 
 -- Bullet fire hook with hitmarker raycast
-AR2_showHitmarker = function() end  -- forward declaration
+-- HITMARKER — full implementation
+AR2_showHitmarker = function()
+    if not AR2_CFG.hitmarker.enabled then return end
+    if not AR2_hasDrawing then return end
+    local cfg = AR2_CFG.hitmarker
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    local color = Color3.fromHSV(cfg.colorHue / 360, 1, 1)
+    local s = cfg.size
+    local drawings = {}
+
+    if cfg.shape == "Cross" then
+        local coords = {
+            {center + Vector2.new(-s, -s), center + Vector2.new(s,  s)},
+            {center + Vector2.new(-s,  s), center + Vector2.new(s, -s)},
+        }
+        for _, pts in ipairs(coords) do
+            local l = Drawing.new("Line")
+            l.From, l.To = pts[1], pts[2]
+            l.Color, l.Thickness, l.Transparency, l.Visible = color, 2, 1, true
+            drawings[#drawings+1] = l
+        end
+    elseif cfg.shape == "Dot" then
+        local c = Drawing.new("Circle")
+        c.Position, c.Radius = center, math.max(2, s / 3)
+        c.Color, c.Filled, c.Transparency, c.Visible = color, true, 1, true
+        drawings[1] = c
+    elseif cfg.shape == "Square" then
+        local sq = Drawing.new("Square")
+        sq.Position = center - Vector2.new(s, s)
+        sq.Size = Vector2.new(s * 2, s * 2)
+        sq.Color, sq.Filled, sq.Thickness, sq.Transparency, sq.Visible = color, false, 2, 1, true
+        drawings[1] = sq
+    end
+
+    -- Sound
+    local soundIds = {
+        Hit  = "rbxassetid://9118817318",
+        Ding = "rbxassetid://4612402584",
+        Pop  = "rbxassetid://5801257793",
+    }
+    if cfg.sound ~= "None" and soundIds[cfg.sound] then
+        local snd = Instance.new("Sound")
+        snd.SoundId = soundIds[cfg.sound]
+        snd.Volume = math.clamp(AR2_CFG.misc.hitSoundVolume / 100, 0, 1)
+        snd.Parent = cam
+        snd:Play()
+        game:GetService("Debris"):AddItem(snd, 2)
+    end
+
+    task.delay(cfg.duration, function()
+        for _, d in ipairs(drawings) do pcall(function() d:Remove() end) end
+    end)
+end
 
 AR2_success, AR2_Bullets = pcall(function() return require(AR2_ReplicatedStorage.Client.Libraries.Bullets) end)
 AR2_originalFireFunction = nil
@@ -1683,6 +1737,24 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
 
             if AR2_tracersEnabled then
                 AR2_addTracer(origin, direction)
+            end
+
+            -- Hitmarker: raycast along bullet path to check for character hit
+            if AR2_CFG.hitmarker.enabled then
+                local rp = RaycastParams.new()
+                rp.FilterType = Enum.RaycastFilterType.Exclude
+                rp.FilterDescendantsInstances = { AR2_LocalPlayer.Character }
+                local hit = AR2_Workspace:Raycast(origin, direction * 2000, rp)
+                if hit and hit.Instance then
+                    local model = hit.Instance
+                    while model and not model:IsA("Model") do model = model.Parent end
+                    if model then
+                        local isChar = (AR2_Characters and model.Parent == AR2_Characters)
+                            or (ZombiesFolder and model.Parent == ZombiesFolder)
+                            or model:FindFirstChildOfClass("Humanoid") ~= nil
+                        if isChar then AR2_showHitmarker() end
+                    end
+                end
             end
 
             return result
@@ -1814,10 +1886,13 @@ function AR2_hbeInstallHook()
             if typeof(origin) == "Vector3" and params and typeof(params) == "RaycastParams" then
                 local filter = params.FilterDescendantsInstances
                 if filter and #filter >= 1 then
-                    -- Exact reference check. Bullet raycasts filter AR2_Characters.
+                    -- Match either exact reference OR workspace-parented Characters folder.
                     local isLikelyBullet = false
                     for _, inst in ipairs(filter) do
-                        if inst == AR2_Characters then
+                        if inst == AR2_Characters or
+                           (typeof(inst) == "Instance" and inst:IsA("Folder")
+                            and inst.Name == "Characters"
+                            and inst.Parent == workspace) then
                             isLikelyBullet = true
                             break
                         end
@@ -1825,7 +1900,10 @@ function AR2_hbeInstallHook()
                     if isLikelyBullet then
                         local cleaned = {}
                         for _, inst in ipairs(filter) do
-                            if inst ~= AR2_Characters then
+                            if inst ~= AR2_Characters and
+                               not (typeof(inst) == "Instance" and inst:IsA("Folder")
+                                    and inst.Name == "Characters"
+                                    and inst.Parent == workspace) then
                                 cleaned[#cleaned + 1] = inst
                             end
                         end
@@ -4358,6 +4436,7 @@ if WindUI then
         MaxSize = Vector2.new(1000, 800),
         ToggleKey = Enum.KeyCode.P,
         Theme = "Dark",
+        Accent = Color3.fromRGB(210, 80, 255),  -- purple-pink accent; change to Color3.fromRGB(80,160,255) for blue, (255,80,180) for pink
         Resizable = true,
         SideBarWidth = 180,
         Transparent = true,
@@ -4596,26 +4675,8 @@ if WindUI then
     local mapTPSection = teleportTab:Section({ Title = "Map TP", Box = false })
     mapTPSection:Button({ Title = "Open Map", Callback = function() AR2_tp.toggleMap(true) end })
 
-    local carTPSection = teleportTab:Section({ Title = "Car TP", Box = false })
-    addDropdown(carTPSection, "Method", {"desync", "rewrite"}, AR2_CFG.car, "method")
-    carTPSection:Button({ Title = "Car to Cursor", Callback = function() AR2_car.toCursor(AR2_CFG.car.method) end })
-    carTPSection:Button({ Title = "Car to Me", Callback = function() AR2_car.toMe(AR2_CFG.car.method) end })
-
-    local noClipTPSection = teleportTab:Section({ Title = "No Clip TP", Box = false })
-    local noClipTarget = "None"
-    local noClipDropdown = noClipTPSection:Dropdown({
-        Title = "Target Player",
-        Values = {"None"},
-        Value = "None",
-        Callback = function(option) noClipTarget = option end
-    })
-    noClipTPSection:Button({ Title = "TP Now", Callback = function()
-        if noClipTarget and noClipTarget ~= "None" then
-            local target = AR2_Players:FindFirstChild(noClipTarget)
-            if target then AR2_flyToPlayer(target) end
-        end
-    end })
-    noClipTPSection:Button({ Title = "Refresh Player List", Callback = function() noClipDropdown:Refresh(getPlayerNames()) end })
+    -- No Clip TP section removed per request
+    -- No Clip TP section removed per request
 
     local waypointSection = teleportTab:Section({ Title = "Waypoints", Box = false })
     waypointSection:Button({ Title = "Save Spot", Callback = function() AR2_tp.saveWaypoint() end })
@@ -4804,49 +4865,46 @@ if WindUI then
     -- Help Tab
     local helpTab = Window:Tab({ Title = "Help", Icon = "info" })
 
-    local keybindsSectionHelp = helpTab:Section({ Title = "Keybinds", Box = false })
-    keybindsSectionHelp:Button({ Title = "T  ——  Click TP to cursor  (enable Click TP toggle first)", Callback = function() end })
-    keybindsSectionHelp:Button({ Title = "Y  ——  TP to selected player  (pick target in Teleport tab)", Callback = function() end })
-    keybindsSectionHelp:Button({ Title = "L  ——  Open map TP  (enable Map TP toggle first)", Callback = function() end })
-    keybindsSectionHelp:Button({ Title = "H  ——  Teleport car to cursor position", Callback = function() end })
-    keybindsSectionHelp:Button({ Title = "P  ——  Toggle this menu open/closed", Callback = function() end })
-    keybindsSectionHelp:Button({ Title = "WASD + Space / Ctrl  ——  Move while Noclip is active", Callback = function() end })
+    local espHelp = helpTab:Section({ Title = "ESP", Box = false })
+    espHelp:Button({ Title = "Player ESP — shows boxes/names over players through walls", Callback = function() end })
+    espHelp:Button({ Title = "Orange = armed. Red/pink = unarmed. Toggle armed color in ESP tab", Callback = function() end })
+    espHelp:Button({ Title = "Chams = colored glow through walls. Works without boxes on", Callback = function() end })
+    espHelp:Button({ Title = "Loot ESP — color shows rarity. Yellow = legendary, purple = rare", Callback = function() end })
+    espHelp:Button({ Title = "Corpse ESP — shows dead bodies. Works even after the player leaves", Callback = function() end })
 
-    local espHelpSection = helpTab:Section({ Title = "ESP", Box = false })
-    espHelpSection:Button({ Title = "Player ESP: draws boxes and names over other players", Callback = function() end })
-    espHelpSection:Button({ Title = "Armed Color: orange = player holding a weapon, red = unarmed", Callback = function() end })
-    espHelpSection:Button({ Title = "Chams: shows players through walls with colored highlight", Callback = function() end })
-    espHelpSection:Button({ Title = "Loot ESP: color = item rarity tier. Min Rank 0 shows everything", Callback = function() end })
-    espHelpSection:Button({ Title = "Corpse ESP: shows dead player bodies. Scans both Corpses + Characters folders", Callback = function() end })
+    local aimHelp = helpTab:Section({ Title = "Aimbot / Silent Aim", Box = false })
+    aimHelp:Button({ Title = "Aimbot — hold right click to snap your mouse to the nearest player", Callback = function() end })
+    aimHelp:Button({ Title = "Silent Aim — bends your bullets toward the target without moving your mouse", Callback = function() end })
+    aimHelp:Button({ Title = "Silent Aim needs Magic Aim ON and players or zombies toggled on", Callback = function() end })
+    aimHelp:Button({ Title = "Max Bend = how far it can curve the bullet. 180 = any angle", Callback = function() end })
+    aimHelp:Button({ Title = "Redirect Chance = how often it actually redirects. 100 = always", Callback = function() end })
 
-    local combatHelpSection = helpTab:Section({ Title = "Combat", Box = false })
-    combatHelpSection:Button({ Title = "Silent Aim: bends bullets toward nearest target in FOV. Needs Magic Aim ON", Callback = function() end })
-    combatHelpSection:Button({ Title = "Silent Aim players/zombies toggle: controls WHAT it targets", Callback = function() end })
-    combatHelpSection:Button({ Title = "HBE (Hitbox Expander): spawns large head hitbox on enemies. Works with silent aim", Callback = function() end })
-    combatHelpSection:Button({ Title = "Rage Bot: auto holds left click when target in FOV. Needs mouse1press support", Callback = function() end })
-    combatHelpSection:Button({ Title = "Rage Bot + ADS: only fires while you hold right click (aim down sights)", Callback = function() end })
-    combatHelpSection:Button({ Title = "Protection Mode: rage bot shoots anyone in radius regardless of FOV direction", Callback = function() end })
-    combatHelpSection:Button({ Title = "Ignore FOV: rage bot targets by 3D distance only, including behind you", Callback = function() end })
-    combatHelpSection:Button({ Title = "No Spread: removes bullet spread. Shots go exactly where aimed", Callback = function() end })
-    combatHelpSection:Button({ Title = "No Bullet Drop: zeroes gravity during fire call so bullets fly flat", Callback = function() end })
-    combatHelpSection:Button({ Title = "Instant Reload: sends reload network packets immediately on reload key", Callback = function() end })
-    combatHelpSection:Button({ Title = "All Fire Modes: unlocks automatic fire on semi-auto and burst weapons", Callback = function() end })
-    combatHelpSection:Button({ Title = "Wallbang: bullets penetrate all geometry. Combine with HBE for wall kills", Callback = function() end })
+    local hbeHelp = helpTab:Section({ Title = "HBE / Combat", Box = false })
+    hbeHelp:Button({ Title = "HBE — puts a big invisible hitbox on enemy heads. More forgiving shots", Callback = function() end })
+    hbeHelp:Button({ Title = "HBE works best with Silent Aim on. Size = how big the hitbox is", Callback = function() end })
+    hbeHelp:Button({ Title = "Rage Bot — auto holds left click when someone is in your FOV", Callback = function() end })
+    hbeHelp:Button({ Title = "ADS Mode — rage bot only fires while you right click. Safer", Callback = function() end })
+    hbeHelp:Button({ Title = "Protection — shoots anyone within the set radius, behind you too", Callback = function() end })
+    hbeHelp:Button({ Title = "Ignore FOV — targets nearest player by distance, not by screen position", Callback = function() end })
+    hbeHelp:Button({ Title = "No Spread — all bullets go exactly where aimed. No random spread", Callback = function() end })
+    hbeHelp:Button({ Title = "Instant Reload — pressing reload finishes instantly. Re-toggles after death", Callback = function() end })
+    hbeHelp:Button({ Title = "All Fire Modes — lets any gun fire on automatic", Callback = function() end })
+    hbeHelp:Button({ Title = "Wallbang — bullets go through walls. Combine with HBE for wall kills", Callback = function() end })
+    hbeHelp:Button({ Title = "Hitmarker — flashes on screen and plays a sound when you hit someone", Callback = function() end })
 
-    local tpHelpSection = helpTab:Section({ Title = "Teleport", Box = false })
-    tpHelpSection:Button({ Title = "Click TP: enable toggle, then press T to TP to cursor ground position", Callback = function() end })
-    tpHelpSection:Button({ Title = "Map TP: enable toggle, press L to open map, click destination to TP there", Callback = function() end })
-    tpHelpSection:Button({ Title = "Player TP: pick a target in dropdown, press Y or click TP to Target button", Callback = function() end })
-    tpHelpSection:Button({ Title = "Car TP: H key or buttons to move nearest vehicle to cursor or your position", Callback = function() end })
+    local tpHelp = helpTab:Section({ Title = "Teleport", Box = false })
+    tpHelp:Button({ Title = "Click TP — enable the toggle, then press T to TP where your cursor is", Callback = function() end })
+    tpHelp:Button({ Title = "Map TP — enable the toggle, press L to open the map, click to TP there", Callback = function() end })
+    tpHelp:Button({ Title = "Player TP — pick a name in the dropdown then press Y or click the button", Callback = function() end })
 
-    local miscHelpSection = helpTab:Section({ Title = "Misc", Box = false })
-    miscHelpSection:Button({ Title = "Speed Hack: adds extra velocity on top of normal movement. Pulse = stutter to avoid kick", Callback = function() end })
-    miscHelpSection:Button({ Title = "Inf Jump: Space teleports you 15 studs up mid-air for repeated jumping", Callback = function() end })
-    miscHelpSection:Button({ Title = "Noclip: anchors nearby terrain and moves you through it. WASD + Space/Ctrl", Callback = function() end })
-    miscHelpSection:Button({ Title = "Freeze Zombies: anchors zombies in place. Whole Server = all zombies on map", Callback = function() end })
-    miscHelpSection:Button({ Title = "Radar: overlays colored dots on the in-game map. Open game map first", Callback = function() end })
-    miscHelpSection:Button({ Title = "Fullbright: removes ambient darkness. Does not affect other players visually", Callback = function() end })
-    miscHelpSection:Button({ Title = "Player Outlines: draws visible highlight on all player characters", Callback = function() end })
+    local miscHelp = helpTab:Section({ Title = "Misc", Box = false })
+    miscHelp:Button({ Title = "Speed — moves you faster. Pulse stops it stuttering to avoid kick", Callback = function() end })
+    miscHelp:Button({ Title = "Inf Jump — press Space in the air to jump again. Keeps going", Callback = function() end })
+    miscHelp:Button({ Title = "Noclip — fly through walls. WASD to move, Space to go up, Ctrl to go down", Callback = function() end })
+    miscHelp:Button({ Title = "Freeze Zombies — stops zombies in place. Whole Server = every zombie on the map", Callback = function() end })
+    miscHelp:Button({ Title = "Fullbright — makes the map fully lit. Only visible to you", Callback = function() end })
+    miscHelp:Button({ Title = "Player Outlines — glows your character and others in a color you pick", Callback = function() end })
+    miscHelp:Button({ Title = "Radar — puts colored dots on the in-game map. Open the map first", Callback = function() end })
 
     WindUI:Notify({ Title = "7177 Scripts", Content = "Loaded", Duration = 5 })
 
