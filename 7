@@ -89,6 +89,7 @@ AR2_CFG = {
         allFireModes = false,
         instantReload = false,
         recoilReduction = 0,
+        noBulletDrop = false,   -- ADD THIS
         hbeOn = false,
         hbeSize = 10,   -- increased default for better range effectiveness
     },
@@ -297,6 +298,7 @@ function AR2_resetConfig()
     AR2_CFG.weapon.allFireModes = false
     AR2_CFG.weapon.instantReload = false
     AR2_CFG.weapon.recoilReduction = 0
+    AR2_CFG.weapon.noBulletDrop = false
     AR2_CFG.weapon.hbeOn = false
     AR2_CFG.weapon.hbeSize = 10
     AR2_CFG.magicAim.redirectChance = 100
@@ -1359,6 +1361,10 @@ local function AR2_instantReloadOnEquip()
     end)
 end
 
+-- Declare watch variables
+local AR2_reloadWatchConn = nil
+local AR2_reloadWatchLast = 0
+
 function setInstantReloadEnabled(enabled)
     AR2_instantReloadEnabled = enabled
     if enabled then
@@ -1506,36 +1512,6 @@ end
 -- Bullet fire hook with hitmarker raycast
 AR2_showHitmarker = function() end  -- forward declaration
 
--- NO BULLET DROP (persistent gravity hold)
-local AR2_noBulletDropConn = nil
-local AR2_originalGravity = workspace.Gravity
-
-function AR2_setNoBulletDrop(enabled)
-    AR2_CFG.weapon.noBulletDrop = enabled
-    if AR2_noBulletDropConn then
-        AR2_noBulletDropConn:Disconnect()
-        AR2_noBulletDropConn = nil
-    end
-    if not enabled then
-        workspace.Gravity = AR2_originalGravity
-        return
-    end
-    workspace.Gravity = 0
-    -- Game occasionally resets workspace.Gravity server-side.
-    -- Heartbeat re-zeroes it every frame so it never drifts back up.
-    AR2_noBulletDropConn = AR2_RunService.Heartbeat:Connect(function()
-        if not AR2_CFG.weapon.noBulletDrop then
-            workspace.Gravity = AR2_originalGravity
-            AR2_noBulletDropConn:Disconnect()
-            AR2_noBulletDropConn = nil
-            return
-        end
-        if workspace.Gravity ~= 0 then
-            workspace.Gravity = 0
-        end
-    end)
-end
-
 AR2_success, AR2_Bullets = pcall(function() return require(AR2_ReplicatedStorage.Client.Libraries.Bullets) end)
 AR2_originalFireFunction = nil
 AR2_recoilOriginal = nil
@@ -1630,13 +1606,19 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                 end)
             end
 
-            local result = AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
+            local result
+            if AR2_CFG.weapon.noBulletDrop then
+                local savedGravity = workspace.Gravity
+                workspace.Gravity = 0
+                result = AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
+                workspace.Gravity = savedGravity
+            else
+                result = AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
+            end
 
             if AR2_tracersEnabled then
                 AR2_addTracer(origin, direction)
             end
-
-            -- Hitmarker via Bullet Impact remote interception (handled in __namecall hook)
 
             return result
         end)
@@ -1767,16 +1749,20 @@ function AR2_hbeInstallHook()
             if typeof(origin) == "Vector3" and params and typeof(params) == "RaycastParams" then
                 local filter = params.FilterDescendantsInstances
                 if filter and #filter >= 1 then
-                    local hasChars = false
-                    local entityCount = 0
-                    for _, inst in ipairs(filter) do
-                        if inst.Name == "Characters" and inst.ClassName == "Folder" then hasChars = true end
-                        if inst.Name == "Zombies" or inst.Name == "Corpses" or inst.Name == "Characters" then entityCount = entityCount + 1 end
+                    -- Only intercept bullet raycasts: local character must be in filter
+                    local localChar = AR2_LocalPlayer.Character
+                    local isBulletRay = false
+                    if localChar then
+                        for _, inst in ipairs(filter) do
+                            if inst == localChar then isBulletRay = true break end
+                        end
                     end
-                    if hasChars and entityCount >= 2 then
+                    if isBulletRay then
                         local cleaned = {}
                         for _, inst in ipairs(filter) do
-                            if inst.Name ~= "Characters" then table.insert(cleaned, inst) end
+                            if inst ~= AR2_Characters then
+                                cleaned[#cleaned + 1] = inst
+                            end
                         end
                         params.FilterDescendantsInstances = cleaned
                     end
@@ -4375,7 +4361,9 @@ if WindUI then
     addSlider(weaponModsSection, "Recoil Reduction %", AR2_CFG.weapon, "recoilReduction", 0, 100)
     addToggle(weaponModsSection, "Hitbox Expander", AR2_CFG.weapon, "hbeOn", function(v) AR2_hbeSetEnabled(v) end)
     addSlider(weaponModsSection, "HBE Size", AR2_CFG.weapon, "hbeSize", 1, 12, function(v) AR2_hbeUpdateSizes() end)
-    addToggle(weaponModsSection, "No Bullet Drop", AR2_CFG.weapon, "noBulletDrop", function(v) AR2_setNoBulletDrop(v) end)
+    addToggle(weaponModsSection, "No Bullet Drop", AR2_CFG.weapon, "noBulletDrop", function(v)
+        AR2_CFG.weapon.noBulletDrop = v
+    end)
 
     local tracersSection = combatTab:Section({ Title = "Tracers", Box = false })
     addToggle(tracersSection, "Enabled", AR2_CFG.misc, "tracers", function(v) AR2_tracersUpdate() end)
@@ -4614,34 +4602,22 @@ if WindUI then
     end })
     settingsSection:Button({ Title = "Reset To Default (All Off)", Callback = function() AR2_resetConfig() end })
 
-    -- Help Tab (using a TextLabel for reliable display)
+    -- Help Tab
     local helpTab = Window:Tab({ Title = "Help", Icon = "info" })
-    local helpSection = helpTab:Section({ Title = "Guide", Box = false })
-    local helpLabel = helpSection:Label({
-        Text = [[
-ESP - Shows boxes, names, tracers, and chams for players, zombies, loot, vehicles, and corpses.
-Aimbot - Moves your crosshair to the selected body part when you hold the aim key. Wall check prevents aiming through walls.
-Silent Aim - Redirects your bullets toward targets without moving your crosshair. Works with any weapon.
-Rage Bot - Automatically holds fire when an enemy is in view. Require ADS makes it only fire while holding right-click. Protection mode shoots anyone within radius regardless of direction.
-Weapon Mods - No spread, wallbang, all fire modes, instant reload, recoil reduction, HBE, and no bullet drop.
-Tracers - Visual bullet tracers. Customize color, length, width, rainbow, and lightning.
-Hitmarker - Visual and optional sound when you hit an enemy.
-Crosshair - Custom crosshair overlay. Choose shape, size, gap, thickness, and color.
-Speed Hack - Increases movement speed. Pulse toggles speed on/off. Adaptive reduces speed if server resets you.
-Inf Jump - Jump repeatedly by briefly anchoring you and boosting upward.
-No Clip - Anchors nearby parts and moves freely with WASD, space, control.
-Teleport - Click TP: press T to teleport to cursor. Player TP: teleport to selected player. Map TP: click map to teleport. Car TP: move vehicles. No Clip TP: fly to player.
-Radar - Overlays player dots on the in-game map. Minimap shows a small persistent map.
-Freeze Zombies - Stops zombies from moving. Whole server or radius.
-Camera - Distance zoom for custom third-person camera.
-Player Outlines - Highlights your character or all players.
-Personal Chams - Changes appearance of your own character and gun.
-Hide - Hide your character model or gun.
-World - Fullbright, no fog, set time, skybox. Remove textures/trees for performance.
-Cars - Infinite fuel, boost, godmode for your vehicle. All Cars applies to every vehicle.
-Configs - Save and load settings. Reset to default turns everything off.
-]]
-    })
+    local keysSection = helpTab:Section({ Title = "Keybinds", Box = false })
+    keysSection:Label({ Title = "T — Click TP (when enabled)" })
+    keysSection:Label({ Title = "Y — TP to target player" })
+    keysSection:Label({ Title = "L — Open map TP" })
+    keysSection:Label({ Title = "H — Car to cursor" })
+    keysSection:Label({ Title = "P — Toggle menu" })
+    keysSection:Label({ Title = "G — Noclip (WASD + Space/Ctrl)" })
+
+    local notesSection = helpTab:Section({ Title = "Notes", Box = false })
+    notesSection:Label({ Title = "Silent aim requires Magic Aim ON + players/zombies toggled" })
+    notesSection:Label({ Title = "HBE works best with silent aim enabled" })
+    notesSection:Label({ Title = "Rage bot needs mouse1press support on your executor" })
+    notesSection:Label({ Title = "Protection mode ignores FOV — shoots anyone in radius" })
+    notesSection:Label({ Title = "No bullet drop: only zero-gravity during fire call" })
 
     WindUI:Notify({ Title = "7177 Scripts", Content = "Loaded", Duration = 5 })
 
@@ -4963,6 +4939,5 @@ function AR2_unload()
     if AR2_mapConn then AR2_mapConn:Disconnect() end
     if AR2_mapGui then AR2_mapGui:Destroy() end
     if AR2_minimapGui then AR2_minimapGui:Destroy() end
-    AR2_setNoBulletDrop(false)
 end
 getgenv().__AR2_UNLOAD = AR2_unload
