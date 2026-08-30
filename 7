@@ -1655,9 +1655,6 @@ function stopWallbangTagging()
     AR2_wallbangSaved = {}
 end
 
--- Bullet firing flag for HBE
-AR2_bulletFiringFlag = false
-
 -- Hitmarker: GUI-based red X flash
 AR2_showHitmarker = function()
     if not AR2_CFG.hitmarker.enabled then return end
@@ -1802,17 +1799,16 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                 end)
             end
 
-            AR2_bulletFiringFlag = true
             local savedGrav = workspace.Gravity
             if AR2_CFG.weapon.noBulletDrop then workspace.Gravity = 0 end
             local result = AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
             workspace.Gravity = savedGrav
-            AR2_bulletFiringFlag = false
 
             if AR2_tracersEnabled then
                 AR2_addTracer(origin, direction)
             end
 
+            -- Hitmarker: raycast along bullet path to check for character hit
             if AR2_CFG.hitmarker.enabled then
                 local rp = RaycastParams.new()
                 rp.FilterType = Enum.RaycastFilterType.Exclude
@@ -1833,7 +1829,6 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
             return result
         end)
         if not ok then
-            AR2_bulletFiringFlag = false
             warn("[fire] hook error: " .. tostring(result))
             return AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
         end
@@ -1952,48 +1947,41 @@ function AR2_hbeInstallHook()
             end
         end
 
-        -- HBE Raycast interception
-        -- bulletFiringFlag gates this to ONLY run during actual bullet fire.
-        -- This stops the hook from intercepting AR2_findBestOrigin, camera raycasts, etc.
-        if method == "Raycast" and self == workspace
-           and AR2_CFG.weapon.hbeOn and AR2_bulletFiringFlag then
+        -- HBE Raycast interception (OG version — strips Characters, redirects fake head hits)
+        if method == "Raycast" and self == workspace and AR2_CFG.weapon.hbeOn then
             local origin, direction, params = ...
+            -- Type guard: skip non-bullet calls that pass wrong arg types
             if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3"
                or not params or typeof(params) ~= "RaycastParams" then
                 return originalNC(self, ...)
             end
-            -- Strip Characters folder so fake hitboxes are hittable
+            -- Strip Characters folder so fake hitboxes can be hit
             local filter = params.FilterDescendantsInstances
-            if filter then
+            if filter and #filter >= 1 then
                 local cleaned = {}
                 for _, inst in ipairs(filter) do
-                    local skip = false
-                    pcall(function()
-                        skip = inst == AR2_Characters
-                            or (inst:IsA("Folder") and inst.Name == "Characters")
-                    end)
-                    if not skip then cleaned[#cleaned+1] = inst end
+                    if inst.Name ~= "Characters" then
+                        table.insert(cleaned, inst)
+                    end
                 end
                 params.FilterDescendantsInstances = cleaned
             end
-            local ok, result = pcall(originalNC, self, ...)
-            if not ok or not result then return nil end
-            if result.Instance then
+            local result = originalNC(self, ...)
+            if result and result.Instance then
                 for char, fakeHead in pairs(AR2_hbeVisuals) do
-                    if fakeHead and fakeHead.Parent then
-                        local posMatch = (fakeHead.Position - result.Position).Magnitude
-                            < AR2_CFG.weapon.hbeSize * 0.75
-                        if result.Instance == fakeHead or posMatch then
-                            local realHead = char:FindFirstChild("Head")
-                            if realHead then
-                                return {
-                                    Instance = realHead,
-                                    Position = result.Position,
-                                    Normal   = result.Normal,
-                                    Material = result.Material,
-                                    Distance = result.Distance,
-                                }
-                            end
+                    local hit = result.Instance
+                    local posMatch = fakeHead and fakeHead.Parent and
+                        (fakeHead.Position - result.Position).Magnitude < AR2_CFG.weapon.hbeSize * 0.75
+                    if hit == fakeHead or posMatch then
+                        local realHead = char:FindFirstChild("Head")
+                        if realHead then
+                            return {
+                                Instance = realHead,
+                                Position = result.Position,
+                                Normal   = result.Normal,
+                                Material = result.Material,
+                                Distance = result.Distance,
+                            }
                         end
                     end
                 end
@@ -2033,45 +2021,63 @@ function AR2_hbeSetEnabled(enabled)
 end
 
 -- =============================================
--- COSMETIC UNLOCKER (cursor-based, no scanning)
+-- COSMETIC UNLOCKER (F-key only, no server contact)
 -- =============================================
 AR2_cosEquipped   = {}
 AR2_cosUnlockConn = nil
 
-local function AR2_cosApplyFromCursor()
+local function AR2_cosMakeFakePart(itemName)
     local char = AR2_LocalPlayer.Character
-    if not char then return "no character" end
+    if not char then return nil end
     local head = char:FindFirstChild("Head")
     local hrp  = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return "no HumanoidRootPart" end
+    if not hrp then return nil end
+    local attachTo = head or hrp
+    local part = Instance.new("Part")
+    part.Name         = itemName
+    part.Size         = Vector3.new(2.2, 0.3, 2.2)
+    part.Material     = Enum.Material.Neon
+    part.Color        = Color3.fromHSV(math.random(0, 359) / 360, 1, 1)
+    part.CanCollide   = false
+    part.CanTouch     = false
+    part.CanQuery     = false
+    part.Anchored     = false
+    part.CastShadow   = false
+    part.Massless     = true
+    part.Parent       = char
+    part.CFrame       = attachTo.CFrame * CFrame.new(0, attachTo.Size.Y * 0.5 + 0.3, 0)
+    local wc = Instance.new("WeldConstraint")
+    wc.Part0   = attachTo
+    wc.Part1   = part
+    wc.Parent  = part
+    return part
+end
 
+local function AR2_cosApply()
+    local char = AR2_LocalPlayer.Character
+    if not char then return "no character" end
     local mousePos  = AR2_UserInputService:GetMouseLocation()
-    local playerGui = AR2_LocalPlayer:FindFirstChild("PlayerGui")
-    if not playerGui then return "no PlayerGui" end
-
-    local elements = playerGui:GetGuiObjectsAtPosition(mousePos.X, mousePos.Y)
+    local gui = AR2_LocalPlayer:FindFirstChild("PlayerGui")
+    if not gui then return "no PlayerGui" end
+    local elements = gui:GetGuiObjectsAtPosition(mousePos.X, mousePos.Y)
     local btn = nil
     for _, el in ipairs(elements) do
         if el:IsA("ImageButton") or el:IsA("TextButton") then
-            btn = el
-            break
+            btn = el break
         end
     end
-    if not btn then return "no button under cursor" end
-
+    if not btn then return "no item under cursor" end
     local itemName = btn:GetAttribute("ItemName")
         or btn:GetAttribute("CosmeticId")
         or btn:GetAttribute("Id")
         or btn.Name
-
-    local slot = btn:GetAttribute("Slot") or btn:GetAttribute("CosmeticType") or itemName
+    local slot = btn:GetAttribute("Slot") or btn:GetAttribute("CosmeticType") or "default"
     if AR2_cosEquipped[slot] then
         pcall(function() AR2_cosEquipped[slot]:Destroy() end)
         AR2_cosEquipped[slot] = nil
     end
-
     local model = nil
-    local function searchForModel(root)
+    local function findInVP(root)
         for _, d in ipairs(root:GetDescendants()) do
             if d:IsA("ViewportFrame") then
                 for _, child in ipairs(d:GetChildren()) do
@@ -2082,49 +2088,38 @@ local function AR2_cosApplyFromCursor()
                 end
             end
         end
-        return nil
     end
-
-    model = searchForModel(btn)
-    if not model and btn.Parent then model = searchForModel(btn.Parent) end
-
-    if not model then
-        local p = Instance.new("Part")
-        p.Name        = itemName
-        p.Size        = Vector3.new(2, 0.35, 2)
-        p.Material    = Enum.Material.Neon
-        p.Color       = Color3.fromRGB(180, 80, 255)
-        p.CanCollide  = false
-        p.Anchored    = false
-        p.CastShadow  = false
-        model = p
-    end
-
-    model.Parent = char
-    local handle
-    if model:IsA("Accessory") then
-        handle = model:FindFirstChild("Handle")
-        pcall(function() char:FindFirstChildWhichIsA("Humanoid"):AddAccessory(model) end)
-    elseif model:IsA("Model") then
-        handle = model.PrimaryPart or model:FindFirstChildOfClass("BasePart")
-    else
-        handle = model
-    end
-
-    if handle then
-        handle.CanCollide = false
-        for _, w in ipairs(handle:GetChildren()) do
-            if w:IsA("WeldConstraint") or w:IsA("Weld") then w:Destroy() end
+    model = findInVP(btn)
+    if not model and btn.Parent then model = findInVP(btn.Parent) end
+    if model then
+        model.Parent = char
+        local handle
+        if model:IsA("Accessory") then
+            handle = model:FindFirstChild("Handle")
+            pcall(function() char:FindFirstChildWhichIsA("Humanoid"):AddAccessory(model) end)
+        elseif model:IsA("Model") then
+            handle = model.PrimaryPart or model:FindFirstChildOfClass("BasePart")
+        else
+            handle = model
         end
-        local wc = Instance.new("WeldConstraint")
-        wc.Part0 = head or hrp
-        wc.Part1 = handle
-        wc.Parent = handle
-        handle.CFrame = (head or hrp).CFrame * CFrame.new(0, 1.5, 0)
+        if handle then
+            handle.CanCollide = false
+            for _, w in ipairs(handle:GetChildren()) do
+                if w:IsA("WeldConstraint") or w:IsA("Weld") then w:Destroy() end
+            end
+            local wc = Instance.new("WeldConstraint")
+            wc.Part0 = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+            wc.Part1 = handle
+            wc.Parent = handle
+            handle.CFrame = (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")).CFrame
+                * CFrame.new(0, 1.5, 0)
+        end
+        AR2_cosEquipped[slot] = model
+    else
+        local fake = AR2_cosMakeFakePart(itemName)
+        if fake then AR2_cosEquipped[slot] = fake end
     end
-
-    AR2_cosEquipped[slot] = model
-    return "worn: " .. tostring(itemName)
+    return "worn: " .. tostring(itemName) .. " (client only)"
 end
 
 function AR2_toggleCosUnlock(enabled)
@@ -2144,13 +2139,9 @@ function AR2_toggleCosUnlock(enabled)
         if not AR2_CFG.misc.cosUnlock then return end
         if gpe then return end
         if input.KeyCode ~= Enum.KeyCode.F then return end
-        local msg = AR2_cosApplyFromCursor()
+        local msg = AR2_cosApply()
         if WindUI then
-            WindUI:Notify({
-                Title   = "Cosmetic Unlocker",
-                Content = msg,
-                Duration = 3,
-            })
+            WindUI:Notify({ Title = "Cosmetics", Content = msg, Duration = 3 })
         end
     end)
 end
@@ -4898,18 +4889,12 @@ if WindUI then
     addToggle(hideSection, "Hide Player", AR2_CFG.misc, "hidePlayer", function(v) AR2_toggleHidePlayer(v) end)
     addToggle(hideSection, "Hide Gun", AR2_CFG.misc, "hideGun", function(v) AR2_toggleHideGun(v) end)
 
-    -- Cosmetic Unlocker Section (NEW - cursor-based)
+    -- Cosmetic Unlocker Section (NEW - F key only)
     local cosSection = miscTab:Section({ Title = "Cosmetic Unlocker", Box = false })
     addToggle(cosSection, "Enabled", AR2_CFG.misc, "cosUnlock", function(v)
         AR2_toggleCosUnlock(v)
     end)
-    cosSection:Button({ Title = "Instructions", Callback = function()
-        WindUI:Notify({
-            Title   = "How to use",
-            Content = "Toggle on → open cosmetics tab in game → hover cursor over any item → press F to wear it client-side only",
-            Duration = 8,
-        })
-    end })
+    cosSection:Button({ Title = "How to use: toggle on → open cosmetics tab → hover item → press F", Callback = function() end })
     cosSection:Button({ Title = "Remove All", Callback = function()
         for _, m in pairs(AR2_cosEquipped) do
             pcall(function() if m and m.Parent then m:Destroy() end end)
