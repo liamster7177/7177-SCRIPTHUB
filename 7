@@ -601,26 +601,42 @@ end
 function AR2_api.zombies() return AR2_cached("zombies", AR2_FRESH, function() AR2_ORIGIN = AR2_localPosition() return AR2_collect(AR2_Zombies, AR2_buildZombie) end) end
 function AR2_api.vehicles() return AR2_cached("vehicles", AR2_STATIC, function() AR2_ORIGIN = AR2_localPosition() return AR2_collect(AR2_Vehicles, AR2_buildVehicle) end) end
 
--- CORPSE ESP FIX: scan both folders, shorter TTL
+-- Persistent corpse memory: keeps showing name/position for 90s after model disappears
+AR2_corpseMemory = AR2_corpseMemory or {}
+
+local function AR2_rememberCorpse(e)
+    AR2_corpseMemory[e.name] = {
+        name = e.name,
+        position = e.position,
+        distance = e.distance,
+        time = os.clock(),
+    }
+end
+
 function AR2_api.corpses()
     return AR2_cached("corpses", 0.25, function()
         AR2_ORIGIN = AR2_localPosition()
         local list = {}
         local seen = {}
-        -- Primary: dedicated Corpses folder
+
+        -- Primary: Corpses folder
         if AR2_Corpses then
             for _, child in ipairs(AR2_Corpses:GetChildren()) do
                 if child:IsA("Model") then
                     local e = AR2_buildCorpse(child)
-                    if e then list[#list+1] = e seen[child] = true end
+                    if e then
+                        list[#list+1] = e
+                        seen[e.name] = true
+                        AR2_rememberCorpse(e)
+                    end
                 end
             end
         end
-        -- Secondary: Characters folder catches players mid-death
-        -- and players who disconnected before corpse was moved
+
+        -- Secondary: Characters folder (dead players before move to Corpses)
         if AR2_Characters then
             for _, child in ipairs(AR2_Characters:GetChildren()) do
-                if child:IsA("Model") and not seen[child]
+                if child:IsA("Model") and not seen[child.Name]
                    and child ~= AR2_LocalPlayer.Character then
                     local hum = child:FindFirstChildWhichIsA("Humanoid")
                     if hum and hum.Health <= 0 then
@@ -628,11 +644,36 @@ function AR2_api.corpses()
                         if e then
                             e.kind = "corpse"
                             list[#list+1] = e
+                            seen[e.name] = true
+                            AR2_rememberCorpse(e)
                         end
                     end
                 end
             end
         end
+
+        -- Ghost layer: show remembered corpses whose models are gone (player disconnected)
+        local now = os.clock()
+        for name, mem in pairs(AR2_corpseMemory) do
+            if now - mem.time > 90 then
+                AR2_corpseMemory[name] = nil
+            elseif not seen[name] then
+                -- Model gone but still within memory window — show as ghost entry
+                local dist = (mem.position - AR2_ORIGIN).Magnitude
+                list[#list+1] = {
+                    kind = "corpse",
+                    model = nil,
+                    name = name,
+                    position = mem.position,
+                    distance = dist,
+                    isPlayer = true,
+                    online = false,
+                    root = nil,
+                    isGhost = true,
+                }
+            end
+        end
+
         table.sort(list, function(a, b) return a.distance < b.distance end)
         return list
     end)
@@ -858,7 +899,31 @@ function AR2_buildFrame()
             if e.distance <= c.maxDist and (not c.playersOnly or e.isPlayer) then
                 local bits = {}
                 if c.dist then bits[#bits+1] = AR2_fmtDist(e.distance) .. "s" end
-                if AR2_drawEntity(e.model, AR2_COLORS.corpse, c.name and e.name or nil, table.concat(bits, "  "), c) then counts.corpse = counts.corpse + 1 end
+                -- Ghost entries (player left) have no model — draw name only via text
+                if e.isGhost then
+                    AR2_slot = AR2_slot + 1
+                    local v = AR2_acquireVisual(AR2_slot)
+                    v.box.Visible = false
+                    v.tracer.Visible = false
+                    v.info.Visible = false
+                    local cam = Workspace.CurrentCamera
+                    if cam then
+                        local sp, onScreen = cam:WorldToViewportPoint(e.position)
+                        if onScreen and sp.Z > 0 then
+                            v.name.Text = e.name .. " [left]"
+                            v.name.Color = AR2_COLORS.corpse
+                            v.name.Size = AR2_CFG.style.textSize
+                            v.name.Position = Vector2.new(sp.X, sp.Y - 10)
+                            v.name.Visible = true
+                        else
+                            v.name.Visible = false
+                        end
+                    end
+                elseif e.model then
+                    if AR2_drawEntity(e.model, AR2_COLORS.corpse, c.name and e.name or nil, table.concat(bits, "  "), c) then
+                        counts.corpse = counts.corpse + 1
+                    end
+                end
             end
         end
     end
@@ -1523,7 +1588,7 @@ end
 local wallbangTagConn = nil
 local CharactersFolder = AR2_Workspace:WaitForChild("Characters", 5)
 local ZombiesFolder = AR2_Workspace:WaitForChild("Zombies", 5)
-local AR2_wallbangGroupSaved = {}
+local AR2_wallbangSaved = {}
 local AR2_WALLBANG_GROUPS = { [7]=true, [8]=true, [9]=true, [11]=true, [17]=true }
 
 local function isCharacterPart(part)
@@ -1550,36 +1615,33 @@ local function removeCharacterTags(model)
     end
 end
 
-local function AR2_wallbangForceGroup(desc)
-    if not desc:IsA("BasePart") then return end
-    if isCharacterPart(desc) then return end
-    local gid = desc.CollisionGroupId
+local function AR2_wallbangForcePart(part)
+    if not part:IsA("BasePart") then return end
+    if isCharacterPart(part) then return end
+    local gid = part.CollisionGroupId
     if AR2_WALLBANG_GROUPS[gid] then
-        AR2_wallbangGroupSaved[desc] = gid
-        pcall(function() desc.CollisionGroupId = 0 end)
+        AR2_wallbangSaved[part] = gid
+        pcall(function() part.CollisionGroupId = 0 end)
     end
-    tagPart(desc)
+    tagPart(part)
 end
 
 function startWallbangTagging()
     if wallbangTagConn then return end
-
-    -- Tag all non-character parts and fix map geometry groups
+    -- Tag everything and fix Map geometry groups
     for _, part in ipairs(AR2_Workspace:GetDescendants()) do
-        AR2_wallbangForceGroup(part)
+        AR2_wallbangForcePart(part)
     end
-
-    -- Explicit Map folder pass for grouped geometry
+    -- Explicit Map folder pass
     local mapFolder = AR2_Workspace:FindFirstChild("Map")
     if mapFolder then
         for _, desc in ipairs(mapFolder:GetDescendants()) do
-            AR2_wallbangForceGroup(desc)
+            AR2_wallbangForcePart(desc)
         end
     end
-
     wallbangTagConn = AR2_Workspace.DescendantAdded:Connect(function(desc)
         if desc:IsA("BasePart") then
-            AR2_wallbangForceGroup(desc)
+            AR2_wallbangForcePart(desc)
         elseif desc:IsA("Humanoid") then
             local model = desc.Parent
             if model and model:IsA("Model") then removeCharacterTags(model) end
@@ -1592,69 +1654,63 @@ function stopWallbangTagging()
         wallbangTagConn:Disconnect()
         wallbangTagConn = nil
     end
-    -- Restore saved collision group IDs
-    for part, gid in pairs(AR2_wallbangGroupSaved) do
+    -- Restore all collision groups
+    for part, gid in pairs(AR2_wallbangSaved) do
         pcall(function()
             if part and part.Parent then
                 part.CollisionGroupId = gid
             end
         end)
     end
-    AR2_wallbangGroupSaved = {}
+    AR2_wallbangSaved = {}
 end
 
 -- Bullet firing flag for HBE
 AR2_bulletFiringFlag = false
 
--- Hitmarker full implementation (single definition)
+-- Hitmarker: GUI-based red X flash — works on all executors, no Drawing API dependency
+local AR2_hmGui = nil
+local function AR2_ensureHmGui()
+    if AR2_hmGui and AR2_hmGui.Parent then return AR2_hmGui end
+    local host = (AR2_gethui and AR2_gethui()) or game:GetService("CoreGui")
+    AR2_hmGui = Instance.new("ScreenGui")
+    AR2_hmGui.Name = "ar2_hm"
+    AR2_hmGui.ResetOnSpawn = false
+    AR2_hmGui.IgnoreGuiInset = true
+    AR2_hmGui.DisplayOrder = 999999
+    AR2_hmGui.Parent = host
+    return AR2_hmGui
+end
+
 AR2_showHitmarker = function()
     if not AR2_CFG.hitmarker.enabled then return end
-    if not AR2_hasDrawing then return end
     local cfg = AR2_CFG.hitmarker
     local cam = workspace.CurrentCamera
     if not cam then return end
-    local cx = cam.ViewportSize.X / 2
-    local cy = cam.ViewportSize.Y / 2
-    local color = Color3.fromHSV(cfg.colorHue / 360, 1, 1)
+    local vp = cam.ViewportSize
+    local cx = vp.X / 2
+    local cy = vp.Y / 2
     local s = cfg.size
+    local color = Color3.fromHSV(cfg.colorHue / 360, 1, 1)
+    local gui = AR2_ensureHmGui()
 
-    local drawings = {}
-    if cfg.shape == "Cross" then
-        local coords = {
-            {Vector2.new(cx - s, cy - s), Vector2.new(cx + s, cy + s)},
-            {Vector2.new(cx - s, cy + s), Vector2.new(cx + s, cy - s)},
-        }
-        for _, pts in ipairs(coords) do
-            local l = Drawing.new("Line")
-            l.Visible      = true
-            l.Color        = color
-            l.Thickness    = 2
-            l.Transparency = 1
-            l.From         = pts[1]
-            l.To           = pts[2]
-            drawings[#drawings + 1] = l
-        end
-    elseif cfg.shape == "Dot" then
-        local c = Drawing.new("Circle")
-        c.Visible      = true
-        c.Color        = color
-        c.Radius       = math.max(3, s / 3)
-        c.Filled       = true
-        c.Transparency = 1
-        c.Position     = Vector2.new(cx, cy)
-        drawings[1] = c
-    elseif cfg.shape == "Square" then
-        local sq = Drawing.new("Square")
-        sq.Visible      = true
-        sq.Color        = color
-        sq.Filled       = false
-        sq.Thickness    = 2
-        sq.Transparency = 1
-        sq.Position     = Vector2.new(cx - s, cy - s)
-        sq.Size         = Vector2.new(s * 2, s * 2)
-        drawings[1] = sq
+    -- Draw X using two thin Frames rotated 45 degrees
+    local function makeLine(rot)
+        local f = Instance.new("Frame")
+        f.BackgroundColor3 = color
+        f.BorderSizePixel = 0
+        f.AnchorPoint = Vector2.new(0.5, 0.5)
+        f.Position = UDim2.fromOffset(cx, cy)
+        f.Size = UDim2.fromOffset(s * 2, 3)
+        f.Rotation = rot
+        f.Parent = gui
+        return f
     end
 
+    local line1 = makeLine(45)
+    local line2 = makeLine(-45)
+
+    -- Sound via SoundService (most reliable approach)
     local soundIds = {
         Hit  = "rbxassetid://4612402584",
         Ding = "rbxassetid://6042583150",
@@ -1664,18 +1720,17 @@ AR2_showHitmarker = function()
         pcall(function()
             local snd = Instance.new("Sound")
             snd.SoundId = soundIds[cfg.sound]
-            snd.Volume  = math.clamp((AR2_CFG.misc.hitSoundVolume or 70) / 100, 0, 1)
-            snd.RollOffMaxDistance = 0
-            snd.Parent  = cam
+            snd.Volume = math.clamp((AR2_CFG.misc.hitSoundVolume or 70) / 100, 0, 1)
+            snd.Parent = workspace
             snd:Play()
             game:GetService("Debris"):AddItem(snd, 2)
         end)
     end
 
-    task.delay(math.max(cfg.duration, 0.05), function()
-        for _, d in ipairs(drawings) do
-            pcall(function() d:Remove() end)
-        end
+    -- Remove after duration
+    task.delay(math.max(cfg.duration, 0.08), function()
+        pcall(function() line1:Destroy() end)
+        pcall(function() line2:Destroy() end)
     end)
 end
 
@@ -1774,15 +1829,10 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
             end
 
             AR2_bulletFiringFlag = true
-            local result
-            if AR2_CFG.weapon.noBulletDrop then
-                local savedGravity = workspace.Gravity
-                workspace.Gravity = 0
-                result = AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
-                workspace.Gravity = savedGravity
-            else
-                result = AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
-            end
+            local savedGravity = workspace.Gravity
+            if AR2_CFG.weapon.noBulletDrop then workspace.Gravity = 0 end
+            local result = AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
+            workspace.Gravity = savedGravity
             AR2_bulletFiringFlag = false
 
             if AR2_tracersEnabled then
@@ -1929,7 +1979,7 @@ function AR2_hbeInstallHook()
             end
         end
 
-        -- HBE: only during actual bullet fire
+        -- HBE: flag gates this to bullet-fire raycasts only, zero camera glitch
         if method == "Raycast" and self == workspace
            and AR2_CFG.weapon.hbeOn and AR2_bulletFiringFlag then
             local origin, direction, params = ...
