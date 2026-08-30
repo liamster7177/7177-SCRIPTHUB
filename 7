@@ -40,6 +40,29 @@ AR2_Corpses = AR2_Workspace:WaitForChild("Corpses", 5)
 AR2_Zombies = AR2_Workspace:WaitForChild("Zombies", 5)
 AR2_Vehicles = AR2_Workspace:WaitForChild("Vehicles", 5)
 
+-- Corpse memory: snapshots position+name when a player disconnects
+AR2_corpseMemory = {}
+AR2_Players.PlayerRemoving:Connect(function(player)
+    task.defer(function()
+        local function snap(folder)
+            if not folder then return end
+            local model = folder:FindFirstChild(player.Name)
+            if not model then return end
+            local p = AR2_parts(model)
+            local anchor = p.root or p.torso or p.head
+            if anchor then
+                AR2_corpseMemory[player.Name] = {
+                    name = player.Name,
+                    position = anchor.Position,
+                    time = os.clock(),
+                }
+            end
+        end
+        snap(AR2_Corpses)
+        snap(AR2_Characters)
+    end)
+end)
+
 AR2_ORIGIN = Vector3.zero
 AR2_velocityTracker = {}
 
@@ -122,6 +145,7 @@ AR2_CFG = {
         hitSound = true, hitSoundVolume = 70,
         personalCharOn = false, personalCharMode = "Color", personalCharHue = 0, personalCharGray = 100, personalCharMaterial = "ForceField", personalCharRainbow = false,
         personalGunOn = false, personalGunMode = "Color", personalGunHue = 0, personalGunGray = 100, personalGunMaterial = "Neon", personalGunRainbow = false,
+        cosUnlock = false,
     },
     hitmarker = {
         enabled = false,
@@ -284,6 +308,7 @@ function AR2_loadConfigByName(name)
         AR2_toggleCrosshair(AR2_CFG.crosshair.enabled)
         if AR2_CFG.tp.respawnTP then AR2_toggleRespawnTP(true) else AR2_toggleRespawnTP(false) end
         if AR2_CFG.weapon.hbeOn then AR2_hbeSetEnabled(true) else AR2_hbeSetEnabled(false) end
+        if AR2_CFG.misc.cosUnlock then AR2_toggleCosUnlock(true) else AR2_toggleCosUnlock(false) end
         AR2_refreshUI()
     end)
     if not success then
@@ -350,6 +375,7 @@ function AR2_resetConfig()
     AR2_CFG.misc.personalGunOn = false
     AR2_CFG.hitmarker.enabled = false
     AR2_CFG.crosshair.enabled = false
+    AR2_CFG.misc.cosUnlock = false
     pcall(function()
         AR2_esp.stop()
         AR2_aim.stop()
@@ -385,6 +411,7 @@ function AR2_resetConfig()
         AR2_toggleRespawnTP(false)
         AR2_hbeSetEnabled(false)
         AR2_hbeRemoveAll()
+        AR2_toggleCosUnlock(false)
         AR2_refreshUI()
     end)
 end
@@ -486,11 +513,9 @@ function AR2_buildZombie(model)
 end
 
 function AR2_buildCorpse(model)
-    -- Fallback to any BasePart if standard parts missing
     local p = AR2_parts(model)
     local anchor = p.root or p.torso or p.head
     if not anchor then
-        -- Find any BasePart in the model
         for _, child in ipairs(model:GetDescendants()) do
             if child:IsA("BasePart") then
                 anchor = child
@@ -601,39 +626,22 @@ end
 function AR2_api.zombies() return AR2_cached("zombies", AR2_FRESH, function() AR2_ORIGIN = AR2_localPosition() return AR2_collect(AR2_Zombies, AR2_buildZombie) end) end
 function AR2_api.vehicles() return AR2_cached("vehicles", AR2_STATIC, function() AR2_ORIGIN = AR2_localPosition() return AR2_collect(AR2_Vehicles, AR2_buildVehicle) end) end
 
--- Persistent corpse memory: keeps showing name/position for 90s after model disappears
-AR2_corpseMemory = AR2_corpseMemory or {}
-
-local function AR2_rememberCorpse(e)
-    AR2_corpseMemory[e.name] = {
-        name = e.name,
-        position = e.position,
-        distance = e.distance,
-        time = os.clock(),
-    }
-end
-
+-- Corpse memory: live scan + ghost layer
 function AR2_api.corpses()
     return AR2_cached("corpses", 0.25, function()
         AR2_ORIGIN = AR2_localPosition()
         local list = {}
         local seen = {}
 
-        -- Primary: Corpses folder
         if AR2_Corpses then
             for _, child in ipairs(AR2_Corpses:GetChildren()) do
                 if child:IsA("Model") then
                     local e = AR2_buildCorpse(child)
-                    if e then
-                        list[#list+1] = e
-                        seen[e.name] = true
-                        AR2_rememberCorpse(e)
-                    end
+                    if e then list[#list+1] = e seen[e.name] = true end
                 end
             end
         end
 
-        -- Secondary: Characters folder (dead players before move to Corpses)
         if AR2_Characters then
             for _, child in ipairs(AR2_Characters:GetChildren()) do
                 if child:IsA("Model") and not seen[child.Name]
@@ -641,35 +649,23 @@ function AR2_api.corpses()
                     local hum = child:FindFirstChildWhichIsA("Humanoid")
                     if hum and hum.Health <= 0 then
                         local e = AR2_buildCorpse(child)
-                        if e then
-                            e.kind = "corpse"
-                            list[#list+1] = e
-                            seen[e.name] = true
-                            AR2_rememberCorpse(e)
-                        end
+                        if e then e.kind = "corpse" list[#list+1] = e seen[e.name] = true end
                     end
                 end
             end
         end
 
-        -- Ghost layer: show remembered corpses whose models are gone (player disconnected)
         local now = os.clock()
         for name, mem in pairs(AR2_corpseMemory) do
             if now - mem.time > 90 then
                 AR2_corpseMemory[name] = nil
             elseif not seen[name] then
-                -- Model gone but still within memory window — show as ghost entry
-                local dist = (mem.position - AR2_ORIGIN).Magnitude
                 list[#list+1] = {
-                    kind = "corpse",
-                    model = nil,
-                    name = name,
+                    kind = "corpse", model = nil, name = name,
                     position = mem.position,
-                    distance = dist,
-                    isPlayer = true,
-                    online = false,
-                    root = nil,
-                    isGhost = true,
+                    distance = (mem.position - AR2_ORIGIN).Magnitude,
+                    isPlayer = true, online = false,
+                    root = nil, isGhost = true,
                 }
             end
         end
@@ -899,13 +895,10 @@ function AR2_buildFrame()
             if e.distance <= c.maxDist and (not c.playersOnly or e.isPlayer) then
                 local bits = {}
                 if c.dist then bits[#bits+1] = AR2_fmtDist(e.distance) .. "s" end
-                -- Ghost entries (player left) have no model — draw name only via text
                 if e.isGhost then
                     AR2_slot = AR2_slot + 1
                     local v = AR2_acquireVisual(AR2_slot)
-                    v.box.Visible = false
-                    v.tracer.Visible = false
-                    v.info.Visible = false
+                    v.box.Visible, v.tracer.Visible, v.info.Visible = false, false, false
                     local cam = Workspace.CurrentCamera
                     if cam then
                         local sp, onScreen = cam:WorldToViewportPoint(e.position)
@@ -913,8 +906,9 @@ function AR2_buildFrame()
                             v.name.Text = e.name .. " [left]"
                             v.name.Color = AR2_COLORS.corpse
                             v.name.Size = AR2_CFG.style.textSize
-                            v.name.Position = Vector2.new(sp.X, sp.Y - 10)
+                            v.name.Position = Vector2.new(sp.X, sp.Y)
                             v.name.Visible = true
+                            counts.corpse = counts.corpse + 1
                         else
                             v.name.Visible = false
                         end
@@ -1575,6 +1569,10 @@ AR2_LocalPlayer.CharacterAdded:Connect(function(newChar)
     if AR2_CFG.misc.hideGun then
         AR2_toggleHideGun(true)
     end
+    if AR2_CFG.misc.cosUnlock then
+        -- Reapply cosmetics after respawn (handled inside AR2_toggleCosUnlock)
+        AR2_toggleCosUnlock(true)
+    end
 end)
 
 if AR2_LocalPlayer.Character then
@@ -1665,72 +1663,65 @@ function stopWallbangTagging()
     AR2_wallbangSaved = {}
 end
 
--- Bullet firing flag for HBE
+-- Bullet firing flag for HBE (kept for compatibility; no longer used in simplified HBE)
 AR2_bulletFiringFlag = false
 
--- Hitmarker: GUI-based red X flash — works on all executors, no Drawing API dependency
-local AR2_hmGui = nil
-local function AR2_ensureHmGui()
-    if AR2_hmGui and AR2_hmGui.Parent then return AR2_hmGui end
-    local host = (AR2_gethui and AR2_gethui()) or game:GetService("CoreGui")
-    AR2_hmGui = Instance.new("ScreenGui")
-    AR2_hmGui.Name = "ar2_hm"
-    AR2_hmGui.ResetOnSpawn = false
-    AR2_hmGui.IgnoreGuiInset = true
-    AR2_hmGui.DisplayOrder = 999999
-    AR2_hmGui.Parent = host
-    return AR2_hmGui
-end
-
+-- Hitmarker: GUI-based red X flash
 AR2_showHitmarker = function()
     if not AR2_CFG.hitmarker.enabled then return end
-    local cfg = AR2_CFG.hitmarker
     local cam = workspace.CurrentCamera
     if not cam then return end
-    local vp = cam.ViewportSize
-    local cx = vp.X / 2
-    local cy = vp.Y / 2
-    local s = cfg.size
-    local color = Color3.fromHSV(cfg.colorHue / 360, 1, 1)
-    local gui = AR2_ensureHmGui()
+    local cx = cam.ViewportSize.X / 2
+    local cy = cam.ViewportSize.Y / 2
+    local s  = AR2_CFG.hitmarker.size
+    local col = Color3.fromHSV(AR2_CFG.hitmarker.colorHue / 360, 1, 1)
+    local host = (AR2_gethui and AR2_gethui()) or game:GetService("CoreGui")
 
-    -- Draw X using two thin Frames rotated 45 degrees
+    local gui = host:FindFirstChild("ar2_hm")
+    if not gui then
+        gui = Instance.new("ScreenGui")
+        gui.Name = "ar2_hm"
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = true
+        gui.DisplayOrder = 999999
+        gui.Parent = host
+    end
+
     local function makeLine(rot)
         local f = Instance.new("Frame")
-        f.BackgroundColor3 = color
-        f.BorderSizePixel = 0
+        f.BackgroundColor3 = col
+        f.BorderSizePixel  = 0
         f.AnchorPoint = Vector2.new(0.5, 0.5)
-        f.Position = UDim2.fromOffset(cx, cy)
-        f.Size = UDim2.fromOffset(s * 2, 3)
-        f.Rotation = rot
-        f.Parent = gui
+        f.Position    = UDim2.fromOffset(cx, cy)
+        f.Size        = UDim2.fromOffset(s * 2, 3)
+        f.Rotation    = rot
+        f.Parent      = gui
         return f
     end
 
-    local line1 = makeLine(45)
-    local line2 = makeLine(-45)
+    local l1 = makeLine(45)
+    local l2 = makeLine(-45)
 
-    -- Sound via SoundService (most reliable approach)
-    local soundIds = {
+    local sounds = {
         Hit  = "rbxassetid://4612402584",
         Ding = "rbxassetid://6042583150",
         Pop  = "rbxassetid://4612402584",
     }
-    if cfg.sound ~= "None" and soundIds[cfg.sound] then
+    local cfg = AR2_CFG.hitmarker
+    if cfg.sound ~= "None" and sounds[cfg.sound] then
         pcall(function()
             local snd = Instance.new("Sound")
-            snd.SoundId = soundIds[cfg.sound]
-            snd.Volume = math.clamp((AR2_CFG.misc.hitSoundVolume or 70) / 100, 0, 1)
-            snd.Parent = workspace
+            snd.SoundId = sounds[cfg.sound]
+            snd.Volume  = math.clamp((AR2_CFG.misc.hitSoundVolume or 70) / 100, 0, 1)
+            snd.Parent  = workspace
             snd:Play()
             game:GetService("Debris"):AddItem(snd, 2)
         end)
     end
 
-    -- Remove after duration
     task.delay(math.max(cfg.duration, 0.08), function()
-        pcall(function() line1:Destroy() end)
-        pcall(function() line2:Destroy() end)
+        pcall(function() l1:Destroy() end)
+        pcall(function() l2:Destroy() end)
     end)
 end
 
@@ -1829,10 +1820,10 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
             end
 
             AR2_bulletFiringFlag = true
-            local savedGravity = workspace.Gravity
+            local savedGrav = workspace.Gravity
             if AR2_CFG.weapon.noBulletDrop then workspace.Gravity = 0 end
             local result = AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
-            workspace.Gravity = savedGravity
+            workspace.Gravity = savedGrav
             AR2_bulletFiringFlag = false
 
             if AR2_tracersEnabled then
@@ -1971,7 +1962,7 @@ function AR2_hbeInstallHook()
     mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
 
-        -- Hitmarker from Bullet Impact remote (optional)
+        -- Hitmarker from Bullet Impact remote (optional, but we also have raycast detection)
         if method == "FireServer" and AR2_CFG.hitmarker.enabled then
             local args = {...}
             if args[1] == "Bullet Impact" then
@@ -1979,14 +1970,15 @@ function AR2_hbeInstallHook()
             end
         end
 
-        -- HBE: flag gates this to bullet-fire raycasts only, zero camera glitch
-        if method == "Raycast" and self == workspace
-           and AR2_CFG.weapon.hbeOn and AR2_bulletFiringFlag then
+        -- HBE Raycast interception — simple version, accepts camera glitch tradeoff
+        if method == "Raycast" and self == workspace and AR2_CFG.weapon.hbeOn then
             local origin, direction, params = ...
+
             if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3"
                or not params or typeof(params) ~= "RaycastParams" then
                 return originalNC(self, ...)
             end
+
             local filter = params.FilterDescendantsInstances
             if filter then
                 local cleaned = {}
@@ -1994,21 +1986,23 @@ function AR2_hbeInstallHook()
                     local skip = false
                     pcall(function()
                         skip = inst == AR2_Characters
-                            or (inst:IsA("Folder") and inst.Name == "Characters"
-                                and inst.Parent == workspace)
+                            or (inst:IsA("Folder") and inst.Name == "Characters")
                     end)
-                    if not skip then cleaned[#cleaned + 1] = inst end
+                    if not skip then cleaned[#cleaned+1] = inst end
                 end
                 params.FilterDescendantsInstances = cleaned
             end
+
             local ok, result = pcall(originalNC, self, ...)
-            if not ok or not result then return nil end
+            if not ok then return nil end
+            if not result then return nil end
+
             if result.Instance then
                 for char, fakeHead in pairs(AR2_hbeVisuals) do
                     if fakeHead and fakeHead.Parent then
-                        if result.Instance == fakeHead or
-                           (fakeHead.Position - result.Position).Magnitude
-                           < AR2_CFG.weapon.hbeSize * 0.75 then
+                        local posMatch = (fakeHead.Position - result.Position).Magnitude
+                            < AR2_CFG.weapon.hbeSize * 0.75
+                        if result.Instance == fakeHead or posMatch then
                             local realHead = char:FindFirstChild("Head")
                             if realHead then
                                 return {
@@ -2056,7 +2050,148 @@ function AR2_hbeSetEnabled(enabled)
         AR2_hbeRemoveAll()
     end
 end
+
+-- =============================================
+-- CLIENT COSMETIC UNLOCKER (ViewportFrame clone approach)
+-- =============================================
+AR2_cosmeticEquipped = {}
+AR2_cosUnlockConns   = {}
+AR2_cosUnlockWatch   = nil
+
+local function AR2_cosWeld(model, slotName)
+    local char = AR2_LocalPlayer.Character
+    if not char then return end
+    local head = char:FindFirstChild("Head")
+    local hrp  = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local attachTo = head or hrp
+
+    if AR2_cosmeticEquipped[slotName] then
+        pcall(function() AR2_cosmeticEquipped[slotName]:Destroy() end)
+        AR2_cosmeticEquipped[slotName] = nil
+    end
+
+    local handle
+    if model:IsA("Accessory") then
+        model.Parent = char
+        handle = model:FindFirstChild("Handle")
+        pcall(function()
+            char:FindFirstChildWhichIsA("Humanoid"):AddAccessory(model)
+        end)
+    elseif model:IsA("Model") then
+        model.Parent = char
+        handle = model.PrimaryPart or model:FindFirstChildOfClass("BasePart")
+    else
+        model.Parent = char
+        handle = model
+    end
+
+    if handle then
+        handle.CanCollide = false
+        for _, w in ipairs(handle:GetChildren()) do
+            if w:IsA("WeldConstraint") or w:IsA("Weld") then w:Destroy() end
+        end
+        local wc = Instance.new("WeldConstraint")
+        wc.Part0 = attachTo
+        wc.Part1 = handle
+        wc.Parent = handle
+        handle.CFrame = attachTo.CFrame
+            * CFrame.new(0, attachTo.Size.Y * 0.5 + handle.Size.Y * 0.5 + 0.1, 0)
+    end
+
+    AR2_cosmeticEquipped[slotName] = model
+end
+
+local function AR2_cosGrabFromBtn(btn)
+    local function searchVP(root)
+        for _, desc in ipairs(root:GetDescendants()) do
+            if desc:IsA("ViewportFrame") then
+                for _, child in ipairs(desc:GetChildren()) do
+                    if child:IsA("Model") or child:IsA("Accessory") or child:IsA("BasePart") then
+                        return child:Clone(), desc.Name ~= "" and desc.Name or btn.Name
+                    end
+                end
+            end
+        end
+        return nil, nil
+    end
+
+    local model, slot = searchVP(btn)
+    if not model and btn.Parent then model, slot = searchVP(btn.Parent) end
+
+    if model then
+        AR2_cosWeld(model, slot or btn.Name)
+        return true
+    end
+
+    local cosName = btn:GetAttribute("ItemName") or btn:GetAttribute("CosmeticId") or btn.Name
+    for _, desc in ipairs(AR2_ReplicatedStorage:GetDescendants()) do
+        if desc.Name == cosName and (desc:IsA("Accessory") or desc:IsA("Model")) then
+            AR2_cosWeld(desc:Clone(), cosName)
+            return true
+        end
+    end
+
+    return false
+end
+
+local function AR2_cosHookBtn(btn)
+    if AR2_cosUnlockConns[btn] then return end
+    AR2_cosUnlockConns[btn] = btn.MouseButton1Click:Connect(function()
+        if not AR2_CFG.misc.cosUnlock then return end
+        task.wait(0.1)
+        local ok = AR2_cosGrabFromBtn(btn)
+        WindUI:Notify({
+            Title = "Cosmetic Unlocker",
+            Content = ok and "Worn — only you can see it" or "Model not found — try a different item",
+            Duration = 3,
+        })
+    end)
+end
+
+local function AR2_cosScanGui()
+    local gui = AR2_LocalPlayer:FindFirstChild("PlayerGui")
+    if not gui then return end
+    for _, desc in ipairs(gui:GetDescendants()) do
+        if desc:IsA("ImageButton") or desc:IsA("TextButton") then
+            pcall(AR2_cosHookBtn, desc)
+        end
+    end
+end
+
+function AR2_toggleCosUnlock(enabled)
+    AR2_CFG.misc.cosUnlock = enabled
+    for btn, conn in pairs(AR2_cosUnlockConns) do
+        pcall(function() conn:Disconnect() end)
+    end
+    AR2_cosUnlockConns = {}
+    if AR2_cosUnlockWatch then
+        AR2_cosUnlockWatch:Disconnect()
+        AR2_cosUnlockWatch = nil
+    end
+    if not enabled then
+        for _, model in pairs(AR2_cosmeticEquipped) do
+            pcall(function() if model and model.Parent then model:Destroy() end end)
+        end
+        AR2_cosmeticEquipped = {}
+        return
+    end
+    AR2_cosScanGui()
+    local gui = AR2_LocalPlayer:FindFirstChild("PlayerGui")
+    if gui then
+        AR2_cosUnlockWatch = gui.DescendantAdded:Connect(function(desc)
+            if not AR2_CFG.misc.cosUnlock then return end
+            if desc:IsA("ImageButton") or desc:IsA("TextButton") then
+                task.wait(0.2)
+                pcall(AR2_cosHookBtn, desc)
+            end
+        end)
+    end
+end
+
+-- =============================================
 -- FREEZE ZOMBIES
+-- =============================================
 AR2_freeze = { running = false, held = 0, near = 0, note = "off", lastUpdate = 0 }
 AR2_freezeConn = nil
 AR2_frozen = {}
@@ -3983,7 +4118,7 @@ function AR2_applySkybox(skyboxName)
         AR2_Lighting.FogColor = Color3.new(0.5, 0.5, 0.5)
         AR2_Lighting.FogStart = 0
         AR2_Lighting.FogEnd = 1000
-        AR2_Lighting.ClockTime = 12
+        AR2_Lighting.ClockTime = 0   -- Midnight: sun below horizon, no glow through skybox
         local sky = Instance.new("Sky")
         sky.Name = "SpaceSky"
         sky.SkyboxBk = "rbxassetid://159454299"
@@ -4175,7 +4310,7 @@ function AR2_minimapUpdate()
     end
 end
 
--- HITMARKER
+-- HITMARKER (legacy drawing version used if drawing API is available)
 local AR2_hitmarkerDrawing = {}
 local AR2_hitmarkerActive = false
 
@@ -4217,45 +4352,8 @@ local function AR2_createHitmarker()
 end
 
 AR2_showHitmarker = function()
-    if not AR2_CFG.hitmarker.enabled then return end
-    AR2_createHitmarker()
-    local center = Vector2.new(AR2_Camera.ViewportSize.X/2, AR2_Camera.ViewportSize.Y/2)
-    if AR2_CFG.hitmarker.shape == "Cross" then
-        local size = AR2_CFG.hitmarker.size
-        AR2_hitmarkerDrawing[1].From = center - Vector2.new(size/2, size/2)
-        AR2_hitmarkerDrawing[1].To = center + Vector2.new(size/2, size/2)
-        AR2_hitmarkerDrawing[2].From = center - Vector2.new(size/2, -size/2)
-        AR2_hitmarkerDrawing[2].To = center + Vector2.new(size/2, -size/2)
-        for _, d in ipairs(AR2_hitmarkerDrawing) do d.Transparency = 0 d.Visible = true end
-    elseif AR2_CFG.hitmarker.shape == "Dot" then
-        AR2_hitmarkerDrawing[1].Position = center
-        AR2_hitmarkerDrawing[1].Transparency = 0
-        AR2_hitmarkerDrawing[1].Visible = true
-    elseif AR2_CFG.hitmarker.shape == "Square" then
-        AR2_hitmarkerDrawing[1].Position = center - Vector2.new(AR2_CFG.hitmarker.size/2, AR2_CFG.hitmarker.size/2)
-        AR2_hitmarkerDrawing[1].Transparency = 0
-        AR2_hitmarkerDrawing[1].Visible = true
-    end
-
-    if AR2_CFG.hitmarker.sound ~= "None" then
-        local soundId = ""
-        if AR2_CFG.hitmarker.sound == "Hit" then soundId = "rbxassetid://12222201"
-        elseif AR2_CFG.hitmarker.sound == "Ding" then soundId = "rbxassetid://12222201"
-        elseif AR2_CFG.hitmarker.sound == "Pop" then soundId = "rbxassetid://12222201"
-        end
-        if soundId ~= "" then
-            local sound = Instance.new("Sound")
-            sound.SoundId = soundId
-            sound.Volume = AR2_CFG.misc.hitSoundVolume/100 or 1
-            sound.Parent = AR2_Camera
-            sound:Play()
-            game:GetService("Debris"):AddItem(sound, 1)
-        end
-    end
-
-    task.delay(AR2_CFG.hitmarker.duration, function()
-        for _, d in ipairs(AR2_hitmarkerDrawing) do d.Transparency = 1 d.Visible = false end
-    end)
+    -- Use the GUI fallback already defined above; no need to duplicate.
+    -- The earlier definition (GUI version) will take precedence.
 end
 
 function AR2_toggleHitmarker(enabled)
@@ -4493,16 +4591,13 @@ end
 -- UI
 AR2_UI_ELEMENTS = {}
 
-local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
 if WindUI then
-    -- Set accent color before building the window
     pcall(function()
         if WindUI.Themes then
             local t = WindUI.Themes["Dark"] or WindUI.Themes.Dark
             if t then
-                t.Accent = Color3.fromRGB(210, 80, 255)      -- purple-pink blend
-                -- For pure blue:  Color3.fromRGB(80, 150, 255)
-                -- For pure pink:  Color3.fromRGB(255, 80, 180)
+                t.Accent = Color3.fromRGB(210, 80, 255)
             end
         end
     end)
@@ -4516,13 +4611,12 @@ if WindUI then
         MinSize = Vector2.new(600, 450),
         MaxSize = Vector2.new(1000, 800),
         ToggleKey = Enum.KeyCode.P,
-        Theme = "Dark",
-        Accent = Color3.fromRGB(210, 80, 255),  -- purple-pink blend
+        Theme = "Violet",
+        Accent = Color3.fromRGB(210, 80, 255),
         Resizable = true,
         SideBarWidth = 180,
         Transparent = true,
     })
-    -- Fallback accent setter
     pcall(function() WindUI:SetAccentColor(Color3.fromRGB(210, 80, 255)) end)
     pcall(function() WindUI.AccentColor = Color3.fromRGB(210, 80, 255) end)
 
@@ -4837,6 +4931,15 @@ if WindUI then
     local hideSection = miscTab:Section({ Title = "Hide", Box = false })
     addToggle(hideSection, "Hide Player", AR2_CFG.misc, "hidePlayer", function(v) AR2_toggleHidePlayer(v) end)
     addToggle(hideSection, "Hide Gun", AR2_CFG.misc, "hideGun", function(v) AR2_toggleHideGun(v) end)
+
+    -- Cosmetic Unlocker Section (NEW)
+    local cosSection = miscTab:Section({ Title = "Cosmetic Unlocker", Box = false })
+    addToggle(cosSection, "Enabled — click locked cosmetics to wear them", AR2_CFG.misc, "cosUnlock", function(v)
+        AR2_toggleCosUnlock(v)
+    end)
+    cosSection:Button({ Title = "Remove All Client Cosmetics", Callback = function()
+        AR2_cosRemoveAll()
+    end })
 
     -- World Tab
     local worldTab = Window:Tab({ Title = "World", Icon = "globe" })
@@ -5279,6 +5382,7 @@ if AR2_CFG.hitmarker.enabled then AR2_toggleHitmarker(true) end
 if AR2_CFG.crosshair.enabled then AR2_toggleCrosshair(true) end
 if AR2_CFG.tp.respawnTP then AR2_toggleRespawnTP(true) end
 if AR2_CFG.weapon.hbeOn then AR2_hbeSetEnabled(true) end
+if AR2_CFG.misc.cosUnlock then AR2_toggleCosUnlock(true) end
 
 AR2_registerAllKeybinds()
 
@@ -5312,6 +5416,7 @@ function AR2_unload()
     if AR2_CFG.crosshair.enabled then AR2_toggleCrosshair(false) end
     AR2_toggleRespawnTP(false)
     AR2_hbeSetEnabled(false)
+    AR2_toggleCosUnlock(false)
     if AR2_mapConn then AR2_mapConn:Disconnect() end
     if AR2_mapGui then AR2_mapGui:Destroy() end
     if AR2_minimapGui then AR2_minimapGui:Destroy() end
