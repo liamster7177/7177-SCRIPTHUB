@@ -1,0 +1,619 @@
+We'll extract the core logic for each requested feature from the provided script. The code assumes you have the same environment (Roblox with the game's "Framework" in `ReplicatedFirst`, and services like `Players`, `RunService`, `Lighting`, etc.). We'll present each feature as a self-contained snippet that you can integrate into your own script or UI.
+
+**Important notes:**
+- Some features require the game's Framework (e.g., `require(rf:WaitForChild("Framework"))`). They are only applicable to this specific game (AR2).
+- The UI library (`NL`) is not included; you'll need to create your own toggles/sliders or adapt the code to your UI system.
+- Global variables from the original script that are used by these features will be defined locally in each snippet where possible.
+
+---
+
+## 1. Auto Reload
+
+This feature automatically presses `R` when the magazine is empty, and also includes an "Instant Reload" that skips the reload animation.  
+Requires the game's Framework and `VirtualInputManager`.
+
+```lua
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+-- Framework
+local Framework = require(ReplicatedFirst:WaitForChild("Framework"))
+Framework:WaitForLoaded()
+local PlayerController = Framework.Classes.Players.get()
+
+-- Auto reload state
+local autoReloadEnabled = false
+local isReloading = false
+
+local function doReload()
+    if isReloading then return end
+    isReloading = true
+    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+    task.wait(0.05)
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+    task.wait(2.5)
+    isReloading = false
+end
+
+local function checkAmmo()
+    if not autoReloadEnabled then return end
+    local character = PlayerController.Character
+    if not character then return end
+    local equipped = character.EquippedItem
+    if not equipped or not equipped.__item then return end
+    local ammo = equipped.__item.Attachments.Ammo
+    if not ammo then return end
+    local currentAmmo = ammo.__item.WorkingAmount
+    if currentAmmo == 0 and not isReloading then
+        doReload()
+    end
+end
+
+-- Loop
+task.spawn(function()
+    while true do
+        task.wait(0.15)
+        pcall(checkAmmo)
+    end
+end)
+
+-- Enable/disable: set autoReloadEnabled = true/false
+```
+
+**Instant Reload** (skip reload animation) – hooks the firearm initializer:
+
+```lua
+-- This part requires the specific framework and firearm initializer.
+local instantReloadEnabled = false
+
+task.spawn(function()
+    pcall(function()
+        local Framework = require(ReplicatedFirst:WaitForChild("Framework"))
+        Framework:WaitForLoaded()
+        local FirearmInitializer = require(game:GetService("ReplicatedStorage").Client.Abstracts.ItemInitializers.Firearm)
+        local originalAttemptReload = debug.getupvalue(FirearmInitializer, 7)  -- may need adjustment
+        if type(originalAttemptReload) == "function" then
+            debug.setupvalue(FirearmInitializer, 7, function(...)
+                if instantReloadEnabled then
+                    local args = {...}
+                    if #args >= 4 then
+                        local callback = args[4]
+                        if type(callback) == "function" then
+                            pcall(function()
+                                callback("Commit", "Load")
+                                callback("Commit", "End")
+                            end)
+                        end
+                    end
+                    return true
+                end
+                return originalAttemptReload(...)
+            end)
+        end
+    end)
+end)
+```
+
+---
+
+## 2. Remove Shadows
+
+Simply toggles `Lighting.GlobalShadows`.
+
+```lua
+local Lighting = game:GetService("Lighting")
+local noShadows = false  -- set to true to remove shadows
+
+Lighting.GlobalShadows = not noShadows
+```
+
+---
+
+## 3. Remove Leaves
+
+Makes foliage parts (leaves, fronds, pine leaves) transparent. Handles parts added later.
+
+```lua
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+
+local removeLeaves = false
+local originalTransparencies = {}
+local descendantConnection = nil
+
+local function setLeavesTransparency(enabled)
+    local mapElements = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("Elements")
+    if not mapElements then return end
+
+    local function processPart(part)
+        if part.Name == "Fronds" or part.Name == "Leaves" or part.Name == "PineLeaves" then
+            if enabled then
+                if not originalTransparencies[part] then
+                    originalTransparencies[part] = part.Transparency
+                end
+                part.Transparency = 1
+            else
+                local original = originalTransparencies[part]
+                if original ~= nil then
+                    part.Transparency = original
+                else
+                    part.Transparency = 0
+                end
+            end
+        end
+    end
+
+    -- Apply to existing parts
+    for _, part in ipairs(mapElements:GetDescendants()) do
+        processPart(part)
+    end
+
+    -- Connect to new parts
+    if enabled and not descendantConnection then
+        descendantConnection = mapElements.DescendantAdded:Connect(function(part)
+            task.wait()
+            processPart(part)
+        end)
+    elseif not enabled and descendantConnection then
+        descendantConnection:Disconnect()
+        descendantConnection = nil
+        originalTransparencies = {}
+    end
+end
+
+-- Toggle: setLeavesTransparency(true) to remove, setLeavesTransparency(false) to restore
+```
+
+---
+
+## 4. Custom Sky
+
+Replaces the skybox with a preset from a table.
+
+```lua
+local Lighting = game:GetService("Lighting")
+
+local skyboxes = {
+    Galaxy = {
+        Bk = "http://www.roblox.com/asset/?id=149397692", Dn = "http://www.roblox.com/asset/?id=149397686",
+        Ft = "http://www.roblox.com/asset/?id=149397697", Lf = "http://www.roblox.com/asset/?id=149397684",
+        Rt = "http://www.roblox.com/asset/?id=149397688", Up = "http://www.roblox.com/asset/?id=149397702"
+    },
+    ["Galaxy 2"] = {
+        Bk = "http://www.roblox.com/asset/?id=155441936", Dn = "http://www.roblox.com/asset/?id=155441802",
+        Ft = "http://www.roblox.com/asset/?id=155441818", Lf = "http://www.roblox.com/asset/?id=155441777",
+        Rt = "http://www.roblox.com/asset/?id=155441874", Up = "http://www.roblox.com/asset/?id=155441905"
+    },
+    -- Add more from the original script as needed
+}
+
+local currentSkyName = "Galaxy"   -- default
+
+local function clearSky()
+    for _, child in pairs(Lighting:GetChildren()) do
+        if child:IsA("Sky") then
+            child:Destroy()
+        end
+    end
+end
+
+local function setSky(skyName)
+    local data = skyboxes[skyName]
+    if not data then return end
+    clearSky()
+    local sky = Instance.new("Sky")
+    sky.SkyboxBk = data.Bk
+    sky.SkyboxDn = data.Dn
+    sky.SkyboxFt = data.Ft
+    sky.SkyboxLf = data.Lf
+    sky.SkyboxRt = data.Rt
+    sky.SkyboxUp = data.Up
+    sky.Parent = Lighting
+end
+
+-- Usage:
+-- setSky("Galaxy")      -- apply custom sky
+-- clearSky()            -- restore default (remove custom sky)
+```
+
+---
+
+## 5. Clouds
+
+Modifies the `Clouds` object (if present in workspace). Allows toggling clouds and changing color, cover, density.
+
+```lua
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+
+local clouds = Workspace:FindFirstChildOfClass("Clouds") or (Workspace.Terrain and Workspace.Terrain:FindFirstChildOfClass("Clouds"))
+if not clouds then
+    warn("Clouds object not found")
+    return
+end
+
+-- Defaults from game (adjust as needed)
+local defaultEnabled = clouds.Enabled
+local defaultColor = clouds.Color
+local defaultCover = clouds.Cover
+local defaultDensity = clouds.Density
+
+-- User settings
+local modifyClouds = false
+local cloudsEnabled = true
+local cloudsColor = defaultColor
+local cloudsCover = 0.5
+local cloudsDensity = 0.5
+
+-- Apply continuously
+RunService.RenderStepped:Connect(function()
+    if modifyClouds then
+        clouds.Enabled = cloudsEnabled
+        clouds.Color = cloudsColor
+        clouds.Cover = cloudsCover
+        clouds.Density = cloudsDensity
+    else
+        -- Restore defaults when not modifying
+        clouds.Enabled = defaultEnabled
+        clouds.Color = defaultColor
+        clouds.Cover = defaultCover
+        clouds.Density = defaultDensity
+    end
+end)
+
+-- Set modifyClouds = true to start applying your values.
+```
+
+---
+
+## 6. Color Correction
+
+Applies a `ColorCorrectionEffect` to Lighting with adjustable saturation, contrast, brightness.
+
+```lua
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+
+local colorCorrectionEnabled = false
+local saturation = 1
+local contrast = 0.5   -- will be doubled
+local brightness = 1   -- will be reduced by 1
+
+local colorCorrection = nil
+
+local function updateColorCorrection()
+    if colorCorrectionEnabled then
+        if not colorCorrection or not colorCorrection.Parent then
+            colorCorrection = Lighting:FindFirstChildOfClass("ColorCorrectionEffect") or Instance.new("ColorCorrectionEffect")
+            colorCorrection.Parent = Lighting
+        end
+        colorCorrection.Saturation = saturation
+        colorCorrection.Contrast = contrast * 2   -- original mapped 0..1 -> 0..2
+        colorCorrection.Brightness = brightness - 1 -- original mapped 0.2..2 -> -0.8..1
+        colorCorrection.Enabled = true
+    else
+        if colorCorrection then
+            colorCorrection.Enabled = false
+        end
+    end
+end
+
+-- Call updateColorCorrection() whenever a setting changes or toggle is flipped.
+```
+
+---
+
+## 7. Self Backtrack
+
+Creates a "ghost" of your character at a delayed position, visible only to you.  
+Uses `RunService.Heartbeat` to record CFrame history and creates a model `BT_Self` with cloned body parts.
+
+```lua
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- Configuration
+local backtrackEnabled = false
+local backtrackColor = Color3.fromRGB(255, 255, 255)
+local backtrackTransparency = 0.4
+local backtrackMaterial = Enum.Material.ForceField
+local backtrackDelay = 0.3   -- seconds
+
+-- Internal
+local positionHistory = {}
+local R15_PARTS = {
+    "Head", "UpperTorso", "LowerTorso",
+    "LeftUpperArm", "LeftLowerArm", "LeftHand",
+    "RightUpperArm", "RightLowerArm", "RightHand",
+    "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+    "RightUpperLeg", "RightLowerLeg", "RightFoot"
+}
+
+local function createFakeModel(character, cframe)
+    -- Remove previous fake
+    local old = Workspace:FindFirstChild("BT_Self")
+    if old then old:Destroy() end
+
+    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then return end
+
+    local fakeModel = Instance.new("Model")
+    fakeModel.Name = "BT_Self"
+
+    for _, partName in ipairs(R15_PARTS) do
+        local realPart = character:FindFirstChild(partName)
+        if realPart and realPart:IsA("BasePart") then
+            local fakePart = realPart:Clone()
+            fakePart.Anchored = true
+            fakePart.CanCollide = false
+            fakePart.CanQuery = false
+            fakePart.CanTouch = false
+            fakePart.CastShadow = false
+            fakePart.Massless = true
+            fakePart.Transparency = backtrackTransparency
+            fakePart.Color = backtrackColor
+            fakePart.Material = backtrackMaterial
+            fakePart.Name = partName
+
+            -- Remove non-mesh children (decals, etc.)
+            for _, child in ipairs(fakePart:GetChildren()) do
+                if not child:IsA("SpecialMesh") and not child:IsA("DataModelMesh") then
+                    child:Destroy()
+                end
+            end
+
+            local offset = humanoidRootPart.CFrame:ToObjectSpace(realPart.CFrame)
+            fakePart.CFrame = cframe * offset
+            fakePart.Parent = fakeModel
+        end
+    end
+
+    fakeModel.Parent = Workspace
+end
+
+-- Record history on Heartbeat
+RunService.Heartbeat:Connect(function()
+    if not backtrackEnabled then
+        local old = Workspace:FindFirstChild("BT_Self")
+        if old then old:Destroy() end
+        positionHistory = {}
+        return
+    end
+
+    local character = LocalPlayer.Character
+    local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then return end
+
+    local now = tick()
+    table.insert(positionHistory, { time = now, cframe = humanoidRootPart.CFrame })
+
+    -- Limit history size
+    while #positionHistory > 200 do
+        table.remove(positionHistory, 1)
+    end
+
+    -- Find closest record to desired delay
+    local targetTime = now - backtrackDelay
+    local bestRecord = nil
+    local bestDiff = math.huge
+    for _, record in ipairs(positionHistory) do
+        local diff = math.abs(record.time - targetTime)
+        if diff < bestDiff then
+            bestDiff = diff
+            bestRecord = record
+        end
+    end
+
+    if bestRecord then
+        createFakeModel(character, bestRecord.cframe)
+    end
+end)
+
+-- Toggle backtrackEnabled = true/false
+```
+
+---
+
+## 8. Jump Circle
+
+Creates an expanding ring effect on the ground when the player jumps.
+
+```lua
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- Configuration
+local jumpCircleEnabled = false
+local circleColor = Color3.new(1, 1, 1)
+local startRadius = 1
+local endRadius = 12
+local duration = 1.2
+local iconTexture = "rbxassetid://89391029290549"   -- default icon
+
+local function spawnJumpCircle(position)
+    local part = Instance.new("Part")
+    part.Name = "JumpCircleEffect"
+    part.Shape = Enum.PartType.Block
+    part.Material = Enum.Material.ForceField
+    part.Transparency = 1
+    part.Color = circleColor
+    part.Size = Vector3.new(startRadius, 0.05, startRadius)
+    part.Anchored = true
+    part.CanCollide = false
+    part.CastShadow = false
+
+    -- Raycast downward to place on ground
+    local raycastParams = RaycastParams.new()
+    if LocalPlayer.Character then
+        raycastParams.FilterDescendantsInstances = {LocalPlayer.Character}
+    end
+    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local rayResult = Workspace:Raycast(position, Vector3.new(0, -15, 0), raycastParams)
+    if rayResult then
+        part.Position = rayResult.Position + Vector3.new(0, 0.1, 0)
+    else
+        part.Position = position - Vector3.new(0, 3, 0)
+    end
+
+    -- Decal
+    local decal = Instance.new("Decal")
+    decal.Texture = iconTexture
+    decal.Face = Enum.NormalId.Top
+    decal.Transparency = 0.1
+    decal.Color3 = circleColor
+    decal.Parent = part
+
+    part.Parent = Workspace
+
+    -- Tween expand
+    local expandTween = TweenService:Create(part, TweenInfo.new(duration, Enum.EasingStyle.Circular, Enum.EasingDirection.Out), {
+        Size = Vector3.new(endRadius, 0.05, endRadius)
+    })
+    local fadeTween = TweenService:Create(decal, TweenInfo.new(duration * 0.8, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
+        Transparency = 1
+    })
+
+    expandTween:Play()
+    fadeTween:Play()
+    expandTween.Completed:Once(function()
+        part:Destroy()
+    end)
+end
+
+local function onCharacterAdded(character)
+    local humanoid = character:WaitForChild("Humanoid")
+    humanoid.StateChanged:Connect(function(_, state)
+        if state == Enum.HumanoidStateType.Jumping and jumpCircleEnabled then
+            local rootPart = character:FindFirstChild("HumanoidRootPart")
+            if rootPart then
+                spawnJumpCircle(rootPart.Position)
+            end
+        end
+    end)
+end
+
+LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
+if LocalPlayer.Character then
+    onCharacterAdded(LocalPlayer.Character)
+end
+
+-- Toggle jumpCircleEnabled = true/false
+```
+
+---
+
+## 9. Instant Interact
+
+Makes interaction prompts (e.g., looting) complete instantly. Hooks the game's `GetInteractPromptData`.
+
+```lua
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
+
+local instantInteractEnabled = false
+
+task.spawn(function()
+    local Framework = require(ReplicatedFirst:WaitForChild("Framework"))
+    Framework:WaitForLoaded()
+
+    local Interactables = Framework.Classes.Interactables
+    local originalGetInteractPromptData = Interactables.GetInteractPromptData
+
+    Interactables.GetInteractPromptData = function(...)
+        local data = originalGetInteractPromptData(...)
+        if instantInteractEnabled and data.Actions and data.Actions[1] then
+            data.Actions[1].Time = 0
+        end
+        return data
+    end
+end)
+
+-- Toggle instantInteractEnabled = true/false
+```
+
+---
+
+## 10. Container Persistence
+
+Prevents the game from closing containers when you walk away (blocks the "Inventory Closed" network event).
+
+```lua
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
+
+local containerPersistenceEnabled = false
+
+task.spawn(function()
+    local Framework = require(ReplicatedFirst:WaitForChild("Framework"))
+    Framework:WaitForLoaded()
+
+    local Network = Framework.Libraries.Network
+    local originalSend = Network.Send
+
+    local function newSend(self, eventName, ...)
+        if eventName == "Inventory Closed" and containerPersistenceEnabled then
+            return  -- swallow the event
+        end
+        return originalSend(self, eventName, ...)
+    end
+
+    Network.Send = newSend
+end)
+
+-- Toggle containerPersistenceEnabled = true/false
+```
+
+---
+
+## 11. Player Jesus
+
+Allows walking on water by modifying water surface tags. Water surfaces with the "Swim Surface" tag are changed to "Player Jesus" to become solid.
+
+```lua
+local Workspace = game:GetService("Workspace")
+
+local playerJesusEnabled = false
+
+local function setPlayerJesus(enabled)
+    local water = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("Water") or Workspace:FindFirstChild("Water")
+    if not water then return end
+
+    for _, part in ipairs(water:GetDescendants()) do
+        if enabled then
+            if part:HasTag("Swim Surface") then
+                part:RemoveTag("Swim Surface")
+                part:AddTag("Player Jesus")
+            end
+        else
+            if part:HasTag("Player Jesus") then
+                part:RemoveTag("Player Jesus")
+                part:AddTag("Swim Surface")
+            end
+        end
+    end
+end
+
+-- Usage:
+-- setPlayerJesus(true)   -- enable
+-- setPlayerJesus(false)  -- disable
+```
+
+---
+
+### Additional Notes
+
+- Some features (Auto Reload, Instant Interact, Container Persistence) rely on the game's `Framework` being loaded from `ReplicatedFirst`. Ensure you wait for it with `Framework:WaitForLoaded()`.
+- The `Self Backtrack` feature creates a fake model but does **not** make it invisible to other players; it's only for your own visual reference. The original code also included a `LocalTransparencyModifier` to hide it when the camera is close, but that's optional.
+- The `Jump Circle` uses a custom icon; you can change `iconTexture` to any decal ID.
+- For all features, you need to integrate the toggle variables into your own UI or command system.
+
+If you need the complete UI definitions that were in the original script, let me know, but they are tightly coupled to the custom UI library used there. The above code provides the functional core.
