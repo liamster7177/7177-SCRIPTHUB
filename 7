@@ -76,12 +76,14 @@ AR2_CFG = {
         part = "Head", players = false, zombies = true, visCheck = false,
         showFov = true, showLockLine = true, autoSpeed = true, dropComp = true,
         bulletSpeed = 0, killSpread = true, originShift = true, redirectChance = 100,
-        noTeammate = true,  -- NEW: skip teammates
+        noTeammate = false,
     },
     magicBullet = { searchRadius = 10, forwardNudge = 1 },
     rageBot = {
         on         = false,
-        maxDist    = 1200,
+        maxDist    = 1200,   -- separate distance for rage bot
+        players    = true,
+        zombies    = false,
         noTeammate = true,
     },
     weapon = {
@@ -105,7 +107,7 @@ AR2_CFG = {
         clickTPOn = false, mapTPOn = false, respawnTP = false,
     },
     speed = { on = false, pct = 140, collide = true, pulse = true, pulseOn = 25, pulseOff = 35, adaptive = true, minPct = 105, airborne = false, spoof = false, spoofAs = "Falling" },
-    radar = { on = false, names = true, localToo = false, armedColor = true },
+    radar = { on = false, names = true, localToo = false, armedColor = true, weapon = false, dist = false },
     minimap = { on = false, size = 200, x = 10, y = 50 },
     misc = {
         infJump = false, noclip = false, noclipSpeed = 90,
@@ -127,6 +129,7 @@ AR2_CFG = {
         selfBacktrack = { enabled = false, color = Color3.fromRGB(255,255,255), transparency = 0.4, material = Enum.Material.ForceField, delay = 0.3 },
         jumpCircle = { enabled = false, color = Color3.new(1,1,1), startRadius = 1, endRadius = 12, duration = 1.2 },
         removeShadows = false,
+        containerPersist = false,
     },
     hitmarker = {
         enabled   = false,
@@ -154,12 +157,12 @@ AR2_CFG = {
     },
 }
 
--- Initialize rage bot globals and reload watch timer
-AR2_rageBotConn   = nil
-AR2_rageBotHeld   = false
-AR2_rageBotTarget = nil
+-- Initialize missing globals (Fix 1)
 AR2_reloadWatchLast = 0
 AR2_reloadWatchConn = nil
+AR2_rageBotConn     = nil
+AR2_rageBotHeld     = false
+AR2_rageBotTarget   = nil
 
 AR2_COLORS = {
     player = Color3.fromRGB(255, 80, 90), armed = Color3.fromRGB(255, 140, 40),
@@ -284,6 +287,7 @@ function AR2_loadConfigByName(name)
         AR2_setAutoReload(AR2_CFG.weapon.autoReload)
         AR2_setInstantInteract(AR2_CFG.misc.instantInteract)
         AR2_setContainerPersistence(AR2_CFG.misc.containerPersistence)
+        AR2_setContainerPersist(AR2_CFG.misc.containerPersist)
         AR2_setPlayerJesus(AR2_CFG.misc.playerJesus)
         AR2_setSelfBacktrack(AR2_CFG.misc.selfBacktrack.enabled)
         AR2_setJumpCircle(AR2_CFG.misc.jumpCircle.enabled)
@@ -327,7 +331,6 @@ function AR2_resetConfig()
     AR2_CFG.weapon.autoReload = false
     AR2_CFG.magicAim.redirectChance = 100
     AR2_CFG.rageBot.on = false
-    AR2_CFG.rageBot.noTeammate = true
     AR2_CFG.misc.freeze = false
     AR2_CFG.misc.infJump = false
     AR2_CFG.misc.noclip = false
@@ -363,6 +366,7 @@ function AR2_resetConfig()
     AR2_CFG.misc.cosUnlock = false
     AR2_CFG.misc.instantInteract = false
     AR2_CFG.misc.containerPersistence = false
+    AR2_CFG.misc.containerPersist = false
     AR2_CFG.misc.playerJesus = false
     AR2_CFG.misc.selfBacktrack.enabled = false
     AR2_CFG.misc.jumpCircle.enabled = false
@@ -407,6 +411,7 @@ function AR2_resetConfig()
         AR2_setAutoReload(false)
         AR2_setInstantInteract(false)
         AR2_setContainerPersistence(false)
+        AR2_setContainerPersist(false)
         AR2_setPlayerJesus(false)
         AR2_setSelfBacktrack(false)
         AR2_setJumpCircle(false)
@@ -419,6 +424,12 @@ end
 
 AR2_configLoaded = false
 AR2_refreshConfigList()
+
+-- Tracer stubs (Fix 6)
+AR2_tracersEnabled = false
+function AR2_tracersUpdate() end
+function AR2_tracersStop() end
+function AR2_addTracer() end
 
 function AR2_markDirty() end
 
@@ -1246,25 +1257,28 @@ function AR2_magicTarget()
     local centre = Vector2.new(cam.ViewportSize.X/2, cam.ViewportSize.Y/2)
     local best, bestPart, bestScore = nil, nil, (c.ignoreFov and math.huge or c.fov)
     local pool = {}
-    if c.players then for _, e in ipairs(AR2_api.players()) do pool[#pool+1] = e end end
+    if c.players then
+        for _, e in ipairs(AR2_api.players()) do
+            -- Skip teammates if noTeammate is on
+            local isTeammate = false
+            if AR2_CFG.magicAim.noTeammate and e.player then
+                local myTeam = AR2_LocalPlayer.Team
+                if myTeam and e.player.Team == myTeam then isTeammate = true end
+            end
+            if not isTeammate then pool[#pool+1] = e end
+        end
+    end
     if c.zombies then for _, e in ipairs(AR2_api.zombies()) do pool[#pool+1] = e end end
     for _, entity in ipairs(pool) do
         if entity.distance <= c.maxDist then
-            local isTeammate = false
-            if entity.kind == "player" and c.noTeammate and entity.player then
-                local t = AR2_LocalPlayer.Team
-                isTeammate = (t ~= nil and entity.player.Team == t)
-            end
-            if not isTeammate then
-                local part = AR2_aimPartOf(entity, c.part)
-                if part then
-                    local screenPos, onScreen = cam:WorldToViewportPoint(part.Position)
-                    if c.ignoreFov or (onScreen and screenPos.Z > 0) then
-                        local score = c.ignoreFov and entity.distance or (centre - Vector2.new(screenPos.X, screenPos.Y)).Magnitude
-                        if score < bestScore then
-                            if not c.visCheck or AR2_isVisible(entity.model, part) then
-                                best, bestPart, bestScore = entity, part, score
-                            end
+            local part = AR2_aimPartOf(entity, c.part)
+            if part then
+                local screenPos, onScreen = cam:WorldToViewportPoint(part.Position)
+                if c.ignoreFov or (onScreen and screenPos.Z > 0) then
+                    local score = c.ignoreFov and entity.distance or (centre - Vector2.new(screenPos.X, screenPos.Y)).Magnitude
+                    if score < bestScore then
+                        if not c.visCheck or AR2_isVisible(entity.model, part) then
+                            best, bestPart, bestScore = entity, part, score
                         end
                     end
                 end
@@ -1611,6 +1625,33 @@ function stopWallbangTagging()
     end
     AR2_wallbangSaved = {}
 end
+
+-- CONTAINER PERSISTENCE (Fix 5)
+AR2_containerPersistConn = nil
+AR2_containerPersistEnabled = false
+
+function AR2_setContainerPersist(enabled)
+    AR2_containerPersistEnabled = enabled
+    AR2_CFG.misc.containerPersist = enabled
+    if AR2_containerPersistConn then
+        AR2_containerPersistConn:Disconnect()
+        AR2_containerPersistConn = nil
+    end
+    if not enabled then return end
+
+    -- Poll: re-open any container GUI that closes unexpectedly
+    AR2_containerPersistConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_containerPersistEnabled then return end
+        local playerGui = AR2_LocalPlayer:FindFirstChild("PlayerGui")
+        if not playerGui then return end
+        for _, gui in ipairs(playerGui:GetDescendants()) do
+            if gui:IsA("ScreenGui") and
+               (gui.Name:lower():find("container") or gui.Name:lower():find("loot") or gui.Name:lower():find("storage")) then
+                if not gui.Enabled then gui.Enabled = true end
+            end
+        end
+    end)
+end
 -- =============================================
 -- HITMARKER SYSTEM
 -- GUI built here in main thread.
@@ -1800,6 +1841,7 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                 end
             end
 
+            -- Weapon mods (no setupvalue errors because this is the only hook)
             if AR2_CFG.weapon.wallbang then
                 pcall(function()
                     weaponData.Penetration = 9999
@@ -2042,6 +2084,17 @@ function AR2_hbeInstallHook()
             end
 
             return result
+        end
+
+        -- Container persistence: block close remotes
+        if method == "FireServer" and AR2_containerPersistEnabled then
+            local args = {...}
+            local eventName = tostring(self.Name)
+            local a1 = tostring(args[1] or "")
+            if a1:lower():find("close") and
+               (eventName:lower():find("container") or eventName:lower():find("storage") or a1:lower():find("container")) then
+                return  -- swallow the close event
+            end
         end
 
         return originalNC(self, ...)
@@ -3311,7 +3364,8 @@ do
         local edge = Instance.new("UIStroke") edge.Color = Color3.fromRGB(0,0,0) edge.Thickness = 1.5 edge.Transparency = 0.25 edge.Parent = dot
         local name = Instance.new("TextLabel")
         name.Name = "Name" name.BackgroundTransparency = 1 name.AnchorPoint = Vector2.new(0,0.5) name.Position = UDim2.fromOffset(10,0)
-        name.Size = UDim2.fromOffset(140,16) name.Font = Enum.Font.GothamBold name.TextSize = 12 name.TextXAlignment = Enum.TextXAlignment.Left
+        name.Size = UDim2.fromOffset(200,28)  -- enlarged for weapon/dist
+        name.Font = Enum.Font.GothamBold name.TextSize = 12 name.TextXAlignment = Enum.TextXAlignment.Left
         name.TextStrokeTransparency = 0.4 name.ZIndex = zbase + 6 name.Parent = dot
         return dot
     end
@@ -3349,7 +3403,15 @@ do
                 local colour = radarColorFor(entry)
                 dot.BackgroundColor3 = colour
                 local label = dot:FindFirstChild("Name")
-                if label then label.Visible = AR2_CFG.radar.names label.Text = entry.name label.TextColor3 = colour end
+                if label then
+                    local parts = {}
+                    if AR2_CFG.radar.names then parts[#parts+1] = entry.name end
+                    if AR2_CFG.radar.weapon and entry.item then parts[#parts+1] = "["..entry.item.."]" end
+                    if AR2_CFG.radar.dist then parts[#parts+1] = string.format("%.0fs", entry.distance) end
+                    label.Text = table.concat(parts, "  ")
+                    label.Visible = #parts > 0
+                    label.TextColor3 = colour
+                end
                 drawn = drawn + 1
             end
         end
@@ -4548,14 +4610,13 @@ if WindUI then
     addSlider(silentAimSection, "Forward Nudge", AR2_CFG.magicBullet, "forwardNudge", 0, 5)
     addSlider(silentAimSection, "Redirect Chance %", AR2_CFG.magicAim, "redirectChance", 0, 100)
 
-    -- Rage Bot section (uses silent aim target)
+    -- Rage Bot section (separate maxDist slider, players/zombies toggles)
     local rageBotSection = combatTab:Section({ Title = "Rage Bot", Box = false })
     addToggle(rageBotSection, "Enabled", AR2_CFG.rageBot, "on", function(v) AR2_rageBotSetEnabled(v) end)
-    addSlider(rageBotSection, "Max Distance", AR2_CFG.rageBot, "maxDist", 100, 2000, function(v) AR2_CFG.rageBot.maxDist = v end)
-    addToggle(rageBotSection, "Skip Teammates", AR2_CFG.rageBot, "noTeammate", function(v)
-        AR2_CFG.rageBot.noTeammate = v
-        AR2_CFG.magicAim.noTeammate = v  -- sync with silent aim
-    end)
+    addSlider(rageBotSection, "Max Distance", AR2_CFG.rageBot, "maxDist", 0, 2000, function(v) AR2_CFG.rageBot.maxDist = v end)
+    addToggle(rageBotSection, "Target Players", AR2_CFG.rageBot, "players")
+    addToggle(rageBotSection, "Target Zombies", AR2_CFG.rageBot, "zombies")
+    addToggle(rageBotSection, "Skip Teammates", AR2_CFG.rageBot, "noTeammate", function(v) AR2_CFG.rageBot.noTeammate = v end)
 
     local weaponModsSection = combatTab:Section({ Title = "Weapon Mods", Box = false })
     addToggle(weaponModsSection, "No Spread", AR2_CFG.weapon, "noSpread")
@@ -4657,6 +4718,8 @@ if WindUI then
     addToggle(radarSection, "Names", AR2_CFG.radar, "names")
     addToggle(radarSection, "Include Self", AR2_CFG.radar, "localToo")
     addToggle(radarSection, "Armed Color", AR2_CFG.radar, "armedColor")
+    addToggle(radarSection, "Show Weapon", AR2_CFG.radar, "weapon", function(v) AR2_CFG.radar.weapon = v end)
+    addToggle(radarSection, "Show Distance", AR2_CFG.radar, "dist", function(v) AR2_CFG.radar.dist = v end)
     local minimapSection = radarTab:Section({ Title = "Minimap", Box = false })
     addToggle(minimapSection, "Enabled", AR2_CFG.minimap, "on", function(v) AR2_minimapEnabled = v AR2_minimapUpdate() AR2_updateMinimap() end)
     addSlider(minimapSection, "Size", AR2_CFG.minimap, "size", 100, 600, function(v) AR2_updateMinimap() end)
@@ -4720,6 +4783,7 @@ if WindUI then
     addToggle(extrasSection, "Jump Circle", AR2_CFG.misc.jumpCircle, "enabled", function(v) AR2_setJumpCircle(v) end)
     addToggle(extrasSection, "Instant Interact", AR2_CFG.misc, "instantInteract", function(v) AR2_setInstantInteract(v) end)
     addToggle(extrasSection, "Container Persistence", AR2_CFG.misc, "containerPersistence", function(v) AR2_setContainerPersistence(v) end)
+    addToggle(extrasSection, "Container Persist (Close Blocker)", AR2_CFG.misc, "containerPersist", function(v) AR2_setContainerPersist(v) end)
     addToggle(extrasSection, "Player Jesus", AR2_CFG.misc, "playerJesus", function(v) AR2_setPlayerJesus(v) end)
 
     -- Cosmetics Tab
@@ -5345,7 +5409,10 @@ local AR2_instantInteractOriginal = nil
 
 local function AR2_installInstantInteractHook()
     if AR2_instantInteractHookInstalled then return end
-    local Framework = require(AR2_ReplicatedStorage:WaitForChild("Framework"))
+    local ReplicatedFirst = game:GetService("ReplicatedFirst")
+    local fwModule = ReplicatedFirst:FindFirstChild("Framework")
+    if not fwModule then return end  -- bail if not found
+    local Framework = require(fwModule)
     Framework:WaitForLoaded()
     local Interactables = Framework.Classes.Interactables
     local original = Interactables.GetInteractPromptData
@@ -5378,13 +5445,16 @@ function AR2_setInstantInteract(enabled)
     end
 end
 
--- Container Persistence
+-- Container Persistence (original method)
 local AR2_containerPersistenceEnabled = false
 local AR2_containerPersistenceHooked = false
 local function AR2_hookContainerPersistence()
     if AR2_containerPersistenceHooked then return end
     AR2_containerPersistenceHooked = true
-    local Framework = require(AR2_ReplicatedStorage:WaitForChild("Framework"))
+    local ReplicatedFirst = game:GetService("ReplicatedFirst")
+    local fwModule = ReplicatedFirst:FindFirstChild("Framework")
+    if not fwModule then return end
+    local Framework = require(fwModule)
     Framework:WaitForLoaded()
     local Network = Framework.Libraries.Network
     local originalSend = Network.Send
@@ -5465,6 +5535,7 @@ if AR2_CFG.misc.cosUnlock then AR2_cosSetEnabled(true) end
 AR2_setAutoReload(AR2_CFG.weapon.autoReload)
 AR2_setInstantInteract(AR2_CFG.misc.instantInteract)
 AR2_setContainerPersistence(AR2_CFG.misc.containerPersistence)
+AR2_setContainerPersist(AR2_CFG.misc.containerPersist)
 AR2_setPlayerJesus(AR2_CFG.misc.playerJesus)
 AR2_setSelfBacktrack(AR2_CFG.misc.selfBacktrack.enabled)
 AR2_setJumpCircle(AR2_CFG.misc.jumpCircle.enabled)
@@ -5509,6 +5580,7 @@ function AR2_unload()
     AR2_setAutoReload(false)
     AR2_setInstantInteract(false)
     AR2_setContainerPersistence(false)
+    AR2_setContainerPersist(false)
     AR2_setPlayerJesus(false)
     AR2_setSelfBacktrack(false)
     AR2_setJumpCircle(false)
