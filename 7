@@ -76,13 +76,12 @@ AR2_CFG = {
         part = "Head", players = false, zombies = true, visCheck = false,
         showFov = true, showLockLine = true, autoSpeed = true, dropComp = true,
         bulletSpeed = 0, killSpread = true, originShift = true, redirectChance = 100,
+        noTeammate = true,  -- NEW: skip teammates
     },
     magicBullet = { searchRadius = 10, forwardNudge = 1 },
     rageBot = {
         on         = false,
         maxDist    = 1200,
-        players    = true,
-        zombies    = false,
         noTeammate = true,
     },
     weapon = {
@@ -1251,14 +1250,21 @@ function AR2_magicTarget()
     if c.zombies then for _, e in ipairs(AR2_api.zombies()) do pool[#pool+1] = e end end
     for _, entity in ipairs(pool) do
         if entity.distance <= c.maxDist then
-            local part = AR2_aimPartOf(entity, c.part)
-            if part then
-                local screenPos, onScreen = cam:WorldToViewportPoint(part.Position)
-                if c.ignoreFov or (onScreen and screenPos.Z > 0) then
-                    local score = c.ignoreFov and entity.distance or (centre - Vector2.new(screenPos.X, screenPos.Y)).Magnitude
-                    if score < bestScore then
-                        if not c.visCheck or AR2_isVisible(entity.model, part) then
-                            best, bestPart, bestScore = entity, part, score
+            local isTeammate = false
+            if entity.kind == "player" and c.noTeammate and entity.player then
+                local t = AR2_LocalPlayer.Team
+                isTeammate = (t ~= nil and entity.player.Team == t)
+            end
+            if not isTeammate then
+                local part = AR2_aimPartOf(entity, c.part)
+                if part then
+                    local screenPos, onScreen = cam:WorldToViewportPoint(part.Position)
+                    if c.ignoreFov or (onScreen and screenPos.Z > 0) then
+                        local score = c.ignoreFov and entity.distance or (centre - Vector2.new(screenPos.X, screenPos.Y)).Magnitude
+                        if score < bestScore then
+                            if not c.visCheck or AR2_isVisible(entity.model, part) then
+                                best, bestPart, bestScore = entity, part, score
+                            end
                         end
                     end
                 end
@@ -1754,17 +1760,9 @@ end
 
 AR2_success, AR2_Bullets = pcall(function() return require(AR2_ReplicatedStorage.Client.Libraries.Bullets) end)
 AR2_originalFireFunction = nil
-AR2_recoilOriginal = nil
-AR2_spreadOriginal = nil
-AR2_recoilOriginalFn = nil
 
 if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
     AR2_originalFireFunction = AR2_Bullets.Fire
-    pcall(function()
-        AR2_recoilOriginal = debug.getupvalue(AR2_originalFireFunction, 6)
-        AR2_spreadOriginal = debug.getupvalue(AR2_originalFireFunction, 3)
-        if AR2_recoilOriginal then AR2_recoilOriginalFn = AR2_recoilOriginal end
-    end)
 
     AR2_Bullets.Fire = function(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
         local ok, result = pcall(function()
@@ -1772,100 +1770,34 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
             local originalDirection = direction
 
             local aimEntity, aimPart = nil, nil
-            if AR2_CFG.magicAim.on then
+            if AR2_CFG.magicAim.on or AR2_CFG.rageBot.on then
                 aimEntity, aimPart = AR2_magicTarget()
                 AR2_magicAim.target = aimEntity
             end
 
-            if AR2_CFG.magicAim.on and AR2_CFG.magicAim.originShift then
-                if aimEntity and aimEntity.model then
-                    local headPart = aimEntity.headCollider or aimEntity.head
-                    if headPart then
-                        local nudge = originalOrigin + originalDirection * AR2_CFG.magicBullet.forwardNudge
-                        local newOrigin, clear = AR2_findBestOrigin(nudge, originalDirection, headPart.Position, aimEntity.model)
-                        if clear or newOrigin ~= originalOrigin then
-                            origin = newOrigin
-                            direction = (headPart.Position - origin).Unit
-                        end
-                    end
-                end
-            end
-
-            if AR2_CFG.magicAim.on then
-                local entity, part = aimEntity, aimPart
-                if not entity then entity, part = AR2_magicTarget() end
-                if part then
-                    local aimPoint = AR2_predict(part, origin, entity.velocity)
-                    local bend = aimPoint - origin
-                    if bend.Magnitude > 0.001 then
-                        local angle = math.deg(math.acos(math.clamp(bend.Unit:Dot(direction.Unit), -1, 1)))
-                        local chance = AR2_CFG.magicAim.redirectChance or 100
-                        if angle <= AR2_CFG.magicAim.maxBend and math.random(1,100) <= chance then
-                            direction = bend.Unit
-                        end
-                    end
-                end
-            end
-
-            -- Rage bot: per-bone direction redirect
-            if AR2_CFG.rageBot.on and AR2_rageBotTarget then
-                local t = AR2_rageBotTarget
-                if t and t.model and t.model.Parent then
-                    local rp = RaycastParams.new()
-                    rp.FilterType = Enum.RaycastFilterType.Exclude
-                    rp.FilterDescendantsInstances = { AR2_LocalPlayer.Character, t.model }
-                    local bones = {"HeadCollider","Head","UpperTorso","LowerTorso","HumanoidRootPart"}
-                    local bestBone = t.headCollider or t.head or t.torso or t.root
-                    for _, bn in ipairs(bones) do
-                        local bp = t.model:FindFirstChild(bn)
-                        if bp and bp:IsA("BasePart") then
-                            if not workspace:Raycast(origin, bp.Position - origin, rp) then
-                                bestBone = bp break
+            if (AR2_CFG.magicAim.on or AR2_CFG.rageBot.on) and aimEntity and aimPart then
+                if AR2_CFG.magicAim.originShift then
+                    if aimEntity.model then
+                        local headPart = aimEntity.headCollider or aimEntity.head
+                        if headPart then
+                            local nudge = originalOrigin + originalDirection * AR2_CFG.magicBullet.forwardNudge
+                            local newOrigin, clear = AR2_findBestOrigin(nudge, originalDirection, headPart.Position, aimEntity.model)
+                            if clear or newOrigin ~= originalOrigin then
+                                origin = newOrigin
+                                direction = (headPart.Position - origin).Unit
                             end
                         end
                     end
-                    if bestBone then
-                        direction = (bestBone.Position - origin).Unit
+                end
+                local aimPoint = AR2_predict(aimPart, origin, aimEntity.velocity)
+                local bend = aimPoint - origin
+                if bend.Magnitude > 0.001 then
+                    local angle = math.deg(math.acos(math.clamp(bend.Unit:Dot(direction.Unit), -1, 1)))
+                    local chance = AR2_CFG.magicAim.redirectChance or 100
+                    if angle <= AR2_CFG.magicAim.maxBend and math.random(1,100) <= chance then
+                        direction = bend.Unit
                     end
                 end
-            end
-
-            -- Safe recoil/spread handling
-            if AR2_CFG.weapon.recoilReduction and AR2_CFG.weapon.recoilReduction > 0 then
-                local reduction = AR2_CFG.weapon.recoilReduction / 100
-                if AR2_recoilOriginalFn then
-                    local function newRecoil(...)
-                        local x, y, z, a, b = AR2_recoilOriginalFn(...)
-                        if reduction >= 1 then
-                            return Vector2.new(0,0), 0, 0, 0, 0
-                        else
-                            return Vector2.new(x.X * (1 - reduction), x.Y * (1 - reduction)), z * (1 - reduction), a * (1 - reduction), b * (1 - reduction), 0
-                        end
-                    end
-                    local ok, err = pcall(debug.setupvalue, AR2_originalFireFunction, 6, newRecoil)
-                    if not ok then
-                        AR2_CFG.weapon.recoilReduction = 0
-                    end
-                else
-                    AR2_CFG.weapon.recoilReduction = 0
-                end
-            else
-                if AR2_recoilOriginalFn then
-                    pcall(debug.setupvalue, AR2_originalFireFunction, 6, AR2_recoilOriginalFn)
-                end
-            end
-
-            if AR2_CFG.weapon.noSpread then
-                if AR2_spreadOriginal then
-                    local ok, err = pcall(debug.setupvalue, AR2_originalFireFunction, 3, function(rng, dir) return dir.Unit end)
-                    if not ok then
-                        AR2_CFG.weapon.noSpread = false
-                    end
-                else
-                    AR2_CFG.weapon.noSpread = false
-                end
-            elseif AR2_spreadOriginal then
-                pcall(debug.setupvalue, AR2_originalFireFunction, 3, AR2_spreadOriginal)
             end
 
             if AR2_CFG.weapon.wallbang then
@@ -4603,6 +4535,7 @@ if WindUI then
     addDropdown(silentAimSection, "Target Part", AR2_MAGIC_AIM_PARTS, AR2_CFG.magicAim, "part")
     addToggle(silentAimSection, "Players", AR2_CFG.magicAim, "players")
     addToggle(silentAimSection, "Zombies", AR2_CFG.magicAim, "zombies")
+    addToggle(silentAimSection, "Skip Teammates", AR2_CFG.magicAim, "noTeammate", function(v) AR2_CFG.magicAim.noTeammate = v end)
     addToggle(silentAimSection, "Visible Only", AR2_CFG.magicAim, "visCheck")
     addToggle(silentAimSection, "Show FOV Circle", AR2_CFG.magicAim, "showFov", function(v) AR2_magicUpdate() end)
     addToggle(silentAimSection, "Show Lock Line", AR2_CFG.magicAim, "showLockLine", function(v) AR2_magicUpdate() end)
@@ -4615,14 +4548,13 @@ if WindUI then
     addSlider(silentAimSection, "Forward Nudge", AR2_CFG.magicBullet, "forwardNudge", 0, 5)
     addSlider(silentAimSection, "Redirect Chance %", AR2_CFG.magicAim, "redirectChance", 0, 100)
 
-    -- Rage Bot section (corrected, no label)
+    -- Rage Bot section (uses silent aim target)
     local rageBotSection = combatTab:Section({ Title = "Rage Bot", Box = false })
     addToggle(rageBotSection, "Enabled", AR2_CFG.rageBot, "on", function(v) AR2_rageBotSetEnabled(v) end)
-    addToggle(rageBotSection, "Target Players", AR2_CFG.rageBot, "players")
-    addToggle(rageBotSection, "Target Zombies", AR2_CFG.rageBot, "zombies")
     addSlider(rageBotSection, "Max Distance", AR2_CFG.rageBot, "maxDist", 100, 2000, function(v) AR2_CFG.rageBot.maxDist = v end)
     addToggle(rageBotSection, "Skip Teammates", AR2_CFG.rageBot, "noTeammate", function(v)
         AR2_CFG.rageBot.noTeammate = v
+        AR2_CFG.magicAim.noTeammate = v  -- sync with silent aim
     end)
 
     local weaponModsSection = combatTab:Section({ Title = "Weapon Mods", Box = false })
