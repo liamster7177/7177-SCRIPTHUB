@@ -78,7 +78,13 @@ AR2_CFG = {
         bulletSpeed = 0, killSpread = true, originShift = true, redirectChance = 100,
     },
     magicBullet = { searchRadius = 10, forwardNudge = 1 },
-    rageBot = { on = false, maxDist = 1200, players = true, zombies = false, requireADS = false, protection = false, protectionRadius = 50, noTeammate = true, ignoreFov = true },
+    rageBot = {
+        on         = false,
+        maxDist    = 1200,
+        players    = true,
+        zombies    = false,
+        noTeammate = true,
+    },
     weapon = {
         noRecoil = false, noSpread = false, wallbang = false, allFireModes = false,
         instantReload = false, recoilReduction = 0, noBulletDrop = false,
@@ -154,6 +160,7 @@ AR2_rageBotConn   = nil
 AR2_rageBotHeld   = false
 AR2_rageBotTarget = nil
 AR2_reloadWatchLast = 0
+AR2_reloadWatchConn = nil
 
 AR2_COLORS = {
     player = Color3.fromRGB(255, 80, 90), armed = Color3.fromRGB(255, 140, 40),
@@ -322,8 +329,6 @@ function AR2_resetConfig()
     AR2_CFG.magicAim.redirectChance = 100
     AR2_CFG.rageBot.on = false
     AR2_CFG.rageBot.noTeammate = true
-    AR2_CFG.rageBot.ignoreFov = true
-    AR2_CFG.rageBot.requireADS = false
     AR2_CFG.misc.freeze = false
     AR2_CFG.misc.infJump = false
     AR2_CFG.misc.noclip = false
@@ -1802,28 +1807,30 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                 end
             end
 
-            -- Rage bot: overrides magic aim direction when active
+            -- Rage bot: per-bone direction redirect
             if AR2_CFG.rageBot.on and AR2_rageBotTarget then
                 local t = AR2_rageBotTarget
-                if t.model and t.model.Parent then
+                if t and t.model and t.model.Parent then
                     local rp = RaycastParams.new()
                     rp.FilterType = Enum.RaycastFilterType.Exclude
                     rp.FilterDescendantsInstances = { AR2_LocalPlayer.Character, t.model }
                     local bones = {"HeadCollider","Head","UpperTorso","LowerTorso","HumanoidRootPart"}
-                    local aim = t.headCollider or t.head or t.torso or t.root
+                    local bestBone = t.headCollider or t.head or t.torso or t.root
                     for _, bn in ipairs(bones) do
                         local bp = t.model:FindFirstChild(bn)
                         if bp and bp:IsA("BasePart") then
-                            if not workspace:Raycast(origin, bp.Position-origin, rp) then
-                                aim = bp break
+                            if not workspace:Raycast(origin, bp.Position - origin, rp) then
+                                bestBone = bp break
                             end
                         end
                     end
-                    if aim then direction = (aim.Position - origin).Unit end
+                    if bestBone then
+                        direction = (bestBone.Position - origin).Unit
+                    end
                 end
             end
 
-                        -- Safe recoil/spread handling
+            -- Safe recoil/spread handling
             if AR2_CFG.weapon.recoilReduction and AR2_CFG.weapon.recoilReduction > 0 then
                 local reduction = AR2_CFG.weapon.recoilReduction / 100
                 if AR2_recoilOriginalFn then
@@ -1837,11 +1844,9 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                     end
                     local ok, err = pcall(debug.setupvalue, AR2_originalFireFunction, 6, newRecoil)
                     if not ok then
-                        -- Upvalue index invalid; disable recoil reduction to avoid errors
                         AR2_CFG.weapon.recoilReduction = 0
                     end
                 else
-                    -- No recoil upvalue found, disable feature
                     AR2_CFG.weapon.recoilReduction = 0
                 end
             else
@@ -1861,12 +1866,6 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                 end
             elseif AR2_spreadOriginal then
                 pcall(debug.setupvalue, AR2_originalFireFunction, 3, AR2_spreadOriginal)
-            end
-
-            if AR2_CFG.weapon.noSpread then
-                debug.setupvalue(AR2_originalFireFunction, 3, function(rng, dir) return dir.Unit end)
-            elseif AR2_spreadOriginal then
-                debug.setupvalue(AR2_originalFireFunction, 3, AR2_spreadOriginal)
             end
 
             if AR2_CFG.weapon.wallbang then
@@ -4616,7 +4615,7 @@ if WindUI then
     addSlider(silentAimSection, "Forward Nudge", AR2_CFG.magicBullet, "forwardNudge", 0, 5)
     addSlider(silentAimSection, "Redirect Chance %", AR2_CFG.magicAim, "redirectChance", 0, 100)
 
-        -- Rage Bot section (corrected, no label)
+    -- Rage Bot section (corrected, no label)
     local rageBotSection = combatTab:Section({ Title = "Rage Bot", Box = false })
     addToggle(rageBotSection, "Enabled", AR2_CFG.rageBot, "on", function(v) AR2_rageBotSetEnabled(v) end)
     addToggle(rageBotSection, "Target Players", AR2_CFG.rageBot, "players")
@@ -4625,6 +4624,7 @@ if WindUI then
     addToggle(rageBotSection, "Skip Teammates", AR2_CFG.rageBot, "noTeammate", function(v)
         AR2_CFG.rageBot.noTeammate = v
     end)
+
     local weaponModsSection = combatTab:Section({ Title = "Weapon Mods", Box = false })
     addToggle(weaponModsSection, "No Spread", AR2_CFG.weapon, "noSpread")
     addToggle(weaponModsSection, "Wallbang", AR2_CFG.weapon, "wallbang", function(v) if v then startWallbangTagging() else stopWallbangTagging() end end)
