@@ -1,4 +1,3 @@
--- Full script with all final fixes applied and enhanced hitmarker
 AR2_antidetect = { disabled = 0, hooked = false }
 pcall(function()
     local ScriptError = game:GetService("ScriptContext").Error
@@ -84,8 +83,11 @@ AR2_CFG = {
         noRecoil = false, noSpread = false, wallbang = false, allFireModes = false,
         instantReload = false, recoilReduction = 0, noBulletDrop = false,
         hbeOn = false, hbeSize = 10,
+        autoReload = false,
     },
-    visuals = { fullbright = false, nofog = false, setTime = false, brightness = 3, time = 14, skybox = "Default" },
+    visuals = { fullbright = false, nofog = false, setTime = false, brightness = 3, time = 14, skybox = "Default",
+                cloudsEnabled = false, modifyClouds = false, cloudsColor = Color3.fromRGB(255,255,255), cloudsCover = 0.5, cloudsDensity = 0.5,
+                colorCorrectionEnabled = false, ccSaturation = 1, ccContrast = 0.5, ccBrightness = 1 },
     car = { fuel = false, boost = false, god = false, speed = 120, torque = 3, allCars = false, method = "desync" },
     tp = {
         target = "-", behind = 10, above = 0, side = 0,
@@ -104,7 +106,7 @@ AR2_CFG = {
         infJump = false, noclip = false, noclipSpeed = 90,
         fovZoom = false, zoomFOV = 30, distZoomEnabled = false, distZoomActive = false,
         normalDist = 10, zoomedDist = 3,
-        removeTextures = false, removeTrees = false,
+        removeTextures = false, removeLeaves = false, removeBushes = false,
         hidePlayer = false, hideGun = false,
         removeReticle = false, tracers = false, tracerHue = 0,
         tracerLength = 10, tracerWidth = 2, tracerRainbow = false, tracerLightning = false,
@@ -116,6 +118,10 @@ AR2_CFG = {
         personalCharOn = false, personalCharMode = "Color", personalCharHue = 0, personalCharGray = 100, personalCharMaterial = "ForceField", personalCharRainbow = false,
         personalGunOn = false, personalGunMode = "Color", personalGunHue = 0, personalGunGray = 100, personalGunMaterial = "Neon", personalGunRainbow = false,
         cosUnlock = false,
+        instantInteract = false, containerPersistence = false, playerJesus = false,
+        selfBacktrack = { enabled = false, color = Color3.fromRGB(255,255,255), transparency = 0.4, material = Enum.Material.ForceField, delay = 0.3 },
+        jumpCircle = { enabled = false, color = Color3.new(1,1,1), startRadius = 1, endRadius = 12, duration = 1.2 },
+        removeShadows = false,
     },
     hitmarker = {
         enabled   = false,
@@ -248,7 +254,8 @@ function AR2_loadConfigByName(name)
         if AR2_CFG.misc.noclip then AR2_startNoclip() else AR2_stopNoclip() end
         if AR2_CFG.misc.infJump then AR2_startInfJump() else AR2_stopInfJump() end
         AR2_toggleRemoveTextures(AR2_CFG.misc.removeTextures)
-        AR2_toggleRemoveTrees(AR2_CFG.misc.removeTrees)
+        AR2_toggleRemoveLeaves(AR2_CFG.misc.removeLeaves)
+        AR2_toggleRemoveBushes(AR2_CFG.misc.removeBushes)
         AR2_toggleHidePlayer(AR2_CFG.misc.hidePlayer)
         AR2_toggleHideGun(AR2_CFG.misc.hideGun)
         if AR2_CFG.weapon.wallbang then startWallbangTagging() else stopWallbangTagging() end
@@ -262,6 +269,15 @@ function AR2_loadConfigByName(name)
         if AR2_CFG.tp.respawnTP then AR2_toggleRespawnTP(true) else AR2_toggleRespawnTP(false) end
         if AR2_CFG.weapon.hbeOn then AR2_hbeSetEnabled(true) else AR2_hbeSetEnabled(false) end
         if AR2_CFG.misc.cosUnlock then AR2_cosSetEnabled(true) else AR2_cosSetEnabled(false) end
+        AR2_setAutoReload(AR2_CFG.weapon.autoReload)
+        AR2_setInstantInteract(AR2_CFG.misc.instantInteract)
+        AR2_setContainerPersistence(AR2_CFG.misc.containerPersistence)
+        AR2_setPlayerJesus(AR2_CFG.misc.playerJesus)
+        AR2_setSelfBacktrack(AR2_CFG.misc.selfBacktrack.enabled)
+        AR2_setJumpCircle(AR2_CFG.misc.jumpCircle.enabled)
+        AR2_setRemoveShadows(AR2_CFG.misc.removeShadows)
+        AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, AR2_CFG.visuals.cloudsDensity)
+        AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, AR2_CFG.visuals.ccSaturation, AR2_CFG.visuals.ccContrast, AR2_CFG.visuals.ccBrightness)
         AR2_refreshUI()
     end)
     if not success then warn("[Config Load Error] " .. tostring(err)) end
@@ -296,6 +312,7 @@ function AR2_resetConfig()
     AR2_CFG.weapon.noBulletDrop = false
     AR2_CFG.weapon.hbeOn = false
     AR2_CFG.weapon.hbeSize = 10
+    AR2_CFG.weapon.autoReload = false
     AR2_CFG.magicAim.redirectChance = 100
     AR2_CFG.rageBot.on = false
     AR2_CFG.misc.freeze = false
@@ -309,7 +326,8 @@ function AR2_resetConfig()
     AR2_CFG.misc.globalChams = false
     AR2_CFG.misc.globalCharm = false
     AR2_CFG.misc.removeTextures = false
-    AR2_CFG.misc.removeTrees = false
+    AR2_CFG.misc.removeLeaves = false
+    AR2_CFG.misc.removeBushes = false
     AR2_CFG.misc.hidePlayer = false
     AR2_CFG.misc.hideGun = false
     AR2_CFG.car.fuel = false
@@ -319,6 +337,9 @@ function AR2_resetConfig()
     AR2_CFG.visuals.nofog = false
     AR2_CFG.visuals.setTime = false
     AR2_CFG.visuals.skybox = "Default"
+    AR2_CFG.visuals.cloudsEnabled = false
+    AR2_CFG.visuals.modifyClouds = false
+    AR2_CFG.visuals.colorCorrectionEnabled = false
     AR2_CFG.tp.clickTPOn = false
     AR2_CFG.tp.mapTPOn = false
     AR2_CFG.tp.respawnTP = false
@@ -327,6 +348,12 @@ function AR2_resetConfig()
     AR2_CFG.hitmarker.enabled = false
     AR2_CFG.crosshair.enabled = false
     AR2_CFG.misc.cosUnlock = false
+    AR2_CFG.misc.instantInteract = false
+    AR2_CFG.misc.containerPersistence = false
+    AR2_CFG.misc.playerJesus = false
+    AR2_CFG.misc.selfBacktrack.enabled = false
+    AR2_CFG.misc.jumpCircle.enabled = false
+    AR2_CFG.misc.removeShadows = false
     pcall(function()
         AR2_esp.stop()
         AR2_aim.stop()
@@ -348,7 +375,8 @@ function AR2_resetConfig()
         AR2_stopNoclip()
         AR2_stopInfJump()
         AR2_toggleRemoveTextures(false)
-        AR2_toggleRemoveTrees(false)
+        AR2_toggleRemoveLeaves(false)
+        AR2_toggleRemoveBushes(false)
         AR2_toggleHidePlayer(false)
         AR2_toggleHideGun(false)
         stopWallbangTagging()
@@ -363,6 +391,15 @@ function AR2_resetConfig()
         AR2_hbeSetEnabled(false)
         AR2_hbeRemoveAll()
         AR2_cosSetEnabled(false)
+        AR2_setAutoReload(false)
+        AR2_setInstantInteract(false)
+        AR2_setContainerPersistence(false)
+        AR2_setPlayerJesus(false)
+        AR2_setSelfBacktrack(false)
+        AR2_setJumpCircle(false)
+        AR2_setRemoveShadows(false)
+        AR2_setClouds(false, false, nil, nil, nil)
+        AR2_setColorCorrection(false)
         AR2_refreshUI()
     end)
 end
@@ -577,7 +614,6 @@ function AR2_api.corpses()
     return AR2_cached("corpses", 0.25, function()
         AR2_ORIGIN = AR2_localPosition()
         local list, seen = {}, {}
-        -- Live: Corpses folder
         if AR2_Corpses then
             for _, child in ipairs(AR2_Corpses:GetChildren()) do
                 if child:IsA("Model") then
@@ -586,7 +622,6 @@ function AR2_api.corpses()
                 end
             end
         end
-        -- Live: Characters folder (mid-death or just-disconnected)
         if AR2_Characters then
             for _, child in ipairs(AR2_Characters:GetChildren()) do
                 if child:IsA("Model") and not seen[child.Name]
@@ -599,7 +634,6 @@ function AR2_api.corpses()
                 end
             end
         end
-        -- Ghost: players who left, kept for 90s
         local now = os.clock()
         for name, mem in pairs(AR2_corpseMemory) do
             if now - mem.time > 90 then
@@ -1559,215 +1593,150 @@ function stopWallbangTagging()
 end
 
 -- =============================================
--- HITMARKER — shapes, colors, sounds, rainbow
+-- HITMARKER SYSTEM
+-- GUI built here in main thread.
+-- Bullet hook sets AR2_hitmarkerFlag = true only.
+-- RenderStepped reads the flag and displays.
+-- This avoids the "can't create Instance" error
+-- that happens when you call Instance.new inside
+-- the restricted bullet fire thread.
 -- =============================================
 do
-    -- ── Sound table ──────────────────────────
-    local HM_SOUND_IDS = {
-        ["None"]          = nil,
-        ["Hit Marker"]    = "rbxassetid://8618186140",
-        ["HitMarker 17"]  = "rbxassetid://705502934",
-        ["Classic Ding"]  = "rbxassetid://160432334",
-        ["Tick"]          = "rbxassetid://418252437",
-        ["Warm Ding"]     = "rbxassetid://6042583150",
-        ["Sharp Ping"]    = "rbxassetid://9120386436",
-        ["Game"]          = "GAME",
-    }
-    local HM_SOUND_NAMES = {
-        "None","Hit Marker","HitMarker 17","Classic Ding",
-        "Tick","Warm Ding","Sharp Ping","Game"
-    }
+    local _host = (typeof(AR2_gethui)=="function" and AR2_gethui()) or game:GetService("CoreGui")
+    pcall(function() local o=_host:FindFirstChild("ar2_hm") if o then o:Destroy() end end)
 
-    local _gameSoundId = nil
-    local function findGameSound()
-        if _gameSoundId then return _gameSoundId end
-        for _, c in ipairs({workspace, AR2_ReplicatedStorage}) do
-            for _, d in ipairs(c:GetDescendants()) do
-                if d:IsA("Sound") and d.SoundId ~= "" and d.IsLoaded then
-                    _gameSoundId = d.SoundId
-                    return _gameSoundId
-                end
-            end
-        end
-        return nil
+    local _gui = Instance.new("ScreenGui")
+    _gui.Name="ar2_hm" _gui.ResetOnSpawn=false _gui.IgnoreGuiInset=true
+    _gui.DisplayOrder=999999 _gui.Parent=_host
+
+    local function _mkF(rot)
+        local f=Instance.new("Frame")
+        f.BorderSizePixel=0 f.AnchorPoint=Vector2.new(0.5,0.5)
+        f.Rotation=rot f.ZIndex=10 f.Visible=false f.Parent=_gui
+        return f
+    end
+    local function _round(f)
+        Instance.new("UICorner",f).CornerRadius=UDim.new(1,0)
     end
 
-    local function playHmSound()
-        local name = AR2_CFG.hitmarker.sound
-        local id   = HM_SOUND_IDS[name]
+    local _xA  = _mkF(45)   local _xB  = _mkF(-45)   -- X
+    local _pA  = _mkF(0)    local _pB  = _mkF(90)    -- +
+    local _dot = _mkF(0)    _round(_dot)              -- Dot
+    local _dia = _mkF(45)                             -- Diamond
+    local _cT  = _mkF(0)    _round(_cT)               -- Circle
+    local _cB  = _mkF(0)    _round(_cB)
+    local _cL  = _mkF(0)    _round(_cL)
+    local _cR  = _mkF(0)    _round(_cR)
+    local _sT  = _mkF(0)    local _sB  = _mkF(0)     -- Square
+    local _sL  = _mkF(90)   local _sR  = _mkF(90)
+
+    local _allFrames = {_xA,_xB,_pA,_pB,_dot,_dia,_cT,_cB,_cL,_cR,_sT,_sB,_sL,_sR}
+
+    local function _hideAll()
+        for _,f in ipairs(_allFrames) do f.Visible=false end
+    end
+
+    local _hmActive  = false
+    local _hmEndTime = 0
+    local _rainbowH  = 0
+
+    local _SOUNDS = {
+        ["None"]         = nil,
+        ["Hit Marker"]   = "rbxassetid://8618186140",
+        ["HitMarker 17"] = "rbxassetid://705502934",
+        ["Classic Ding"] = "rbxassetid://160432334",
+        ["Tick"]         = "rbxassetid://418252437",
+        ["Warm Ding"]    = "rbxassetid://6042583150",
+        ["Sharp Ping"]   = "rbxassetid://9120386436",
+        ["Game"]         = "GAME", -- special: use first loaded game sound
+    }
+
+    AR2_HM_SHAPE_NAMES = {"X","+","Dot","Diamond","Circle","Square"}
+    AR2_HM_SOUND_NAMES = {"None","Hit Marker","HitMarker 17","Classic Ding","Tick","Warm Ding","Sharp Ping","Game"}
+
+    local function _playSound()
+        local id = _SOUNDS[AR2_CFG.hitmarker.sound or "None"]
         if not id then return end
-        if id == "GAME" then id = findGameSound() end
-        if not id then return end
+        if id == "GAME" then
+            for _, c in ipairs({workspace, AR2_ReplicatedStorage}) do
+                for _, d in ipairs(c:GetDescendants()) do
+                    if d:IsA("Sound") and d.SoundId ~= "" and d.IsLoaded then
+                        id = d.SoundId
+                        break
+                    end
+                end
+                if id ~= "GAME" then break end
+            end
+            if id == "GAME" then return end
+        end
         task.spawn(function()
-            local snd   = Instance.new("Sound")
-            snd.SoundId = id
-            snd.Volume  = math.clamp((AR2_CFG.misc.hitSoundVolume or 70) / 100, 0, 1)
-            snd.Parent  = workspace
-            snd:Play()
-            game:GetService("Debris"):AddItem(snd, 2)
+            local snd=Instance.new("Sound")
+            snd.SoundId=id
+            snd.Volume=math.clamp((AR2_CFG.misc.hitSoundVolume or 70)/100,0,1)
+            snd.Parent=workspace snd:Play()
+            game:GetService("Debris"):AddItem(snd,2)
         end)
     end
 
-    -- ── GUI host ──────────────────────────────
-    local hmHost = (typeof(AR2_gethui)=="function" and AR2_gethui()) or game:GetService("CoreGui")
-    pcall(function() local o=hmHost:FindFirstChild("ar2_hm") if o then o:Destroy() end end)
-
-    local hmGui = Instance.new("ScreenGui")
-    hmGui.Name="ar2_hm" hmGui.ResetOnSpawn=false hmGui.IgnoreGuiInset=true
-    hmGui.DisplayOrder=999999 hmGui.Parent=hmHost
-
-    local hmParts = {}
-
-    local function mkFrame(rot, zindex)
-        local f = Instance.new("Frame")
-        f.BackgroundColor3    = Color3.fromRGB(255,60,60)
-        f.BorderSizePixel     = 0
-        f.AnchorPoint         = Vector2.new(0.5, 0.5)
-        f.Rotation            = rot or 0
-        f.ZIndex              = zindex or 10
-        f.Visible             = false
-        f.Parent              = hmGui
-        table.insert(hmParts, f)
-        return f
-    end
-
-    local function mkRound(f)
-        local c = Instance.new("UICorner")
-        c.CornerRadius = UDim.new(1, 0)
-        c.Parent = f
-    end
-
-    local xL1 = mkFrame(45)
-    local xL2 = mkFrame(-45)
-
-    local pL1 = mkFrame(0)
-    local pL2 = mkFrame(90)
-
-    local dot = mkFrame(0)
-    mkRound(dot)
-
-    local diamond = mkFrame(45)
-
-    local cT = mkFrame(0)  local cB = mkFrame(0)
-    local cL = mkFrame(0)  local cR = mkFrame(0)
-    for _, f in ipairs({cT,cB,cL,cR}) do mkRound(f) end
-
-    local sT = mkFrame(0)  local sB = mkFrame(0)
-    local sL = mkFrame(90) local sR = mkFrame(90)
-
-    local SHAPES = {
-        ["X"]       = {xL1, xL2},
-        ["+"]       = {pL1, pL2},
-        ["Dot"]     = {dot},
-        ["Diamond"] = {diamond},
-        ["Circle"]  = {cT, cB, cL, cR},
-        ["Square"]  = {sT, sB, sL, sR},
-    }
-    local SHAPE_NAMES = {"X", "+", "Dot", "Diamond", "Circle", "Square"}
-
-    local function hideAll()
-        for _, f in ipairs(hmParts) do f.Visible = false end
-    end
-
-    local hmActive  = false
-    local hmEndTime = 0
-    local hmRainbowHue = 0
-
-    local function applyShape(cx, cy)
-        local cfg  = AR2_CFG.hitmarker
-        local s    = cfg.size
-        local t    = cfg.thickness
-        local g    = cfg.gap
-        local hue  = cfg.rainbow and hmRainbowHue or cfg.colorHue
-        local col  = Color3.fromHSV(hue / 360, 1, 1)
-        local tr   = 1 - math.clamp(cfg.opacity or 1, 0, 1)
+    local function _applyShape(cx,cy)
+        local cfg = AR2_CFG.hitmarker
+        local s   = cfg.size      or 20
+        local t   = cfg.thickness or 3
+        local g   = cfg.gap       or 6
+        local op  = cfg.opacity   or 1
+        local tr  = 1 - math.clamp(op,0,1)
+        local hue = (cfg.rainbow and _rainbowH or (cfg.colorHue or 0)) / 360
+        local col = Color3.fromHSV(hue,1,1)
         local shape = cfg.shape or "X"
 
-        hideAll()
+        _hideAll()
 
-        local function set(f, x, y, w, h)
-            f.Position            = UDim2.fromOffset(x, y)
-            f.Size                = UDim2.fromOffset(w, h)
-            f.BackgroundColor3    = col
-            f.BackgroundTransparency = tr
-            f.Visible             = true
+        local function show(f,x,y,w,h)
+            f.Position=UDim2.fromOffset(x,y) f.Size=UDim2.fromOffset(w,h)
+            f.BackgroundColor3=col f.BackgroundTransparency=tr f.Visible=true
         end
 
-        if shape == "X" then
-            set(xL1, cx, cy, s*2, t)
-            set(xL2, cx, cy, s*2, t)
-
-        elseif shape == "+" then
-            set(pL1, cx, cy, s*2, t)
-            set(pL2, cx, cy, t,   s*2)
-
-        elseif shape == "Dot" then
-            local r = math.max(t*2, 5)
-            set(dot, cx, cy, r, r)
-
-        elseif shape == "Diamond" then
-            local side = s * 1.4
-            set(diamond, cx, cy, side, t)
-
-        elseif shape == "Circle" then
-            local r  = s
-            local ds = math.max(t+2, 6)
-            set(cT, cx,   cy-r, ds, ds)
-            set(cB, cx,   cy+r, ds, ds)
-            set(cL, cx-r, cy,   ds, ds)
-            set(cR, cx+r, cy,   ds, ds)
-
-        elseif shape == "Square" then
-            local half = s
-            set(sT, cx,      cy-half, s*2, t)
-            set(sB, cx,      cy+half, s*2, t)
-            set(sL, cx-half, cy,      t,   s*2)
-            set(sR, cx+half, cy,      t,   s*2)
+        if shape=="X" then
+            show(_xA,cx,cy,s*2,t) show(_xB,cx,cy,s*2,t)
+        elseif shape=="+" then
+            show(_pA,cx,cy,s*2,t) show(_pB,cx,cy,t,s*2)
+        elseif shape=="Dot" then
+            local r=math.max(t*2,5) show(_dot,cx,cy,r,r)
+        elseif shape=="Diamond" then
+            show(_dia,cx,cy,s*1.4,t)
+        elseif shape=="Circle" then
+            local r=s+g local ds=math.max(t+2,6)
+            show(_cT,cx,cy-r,ds,ds) show(_cB,cx,cy+r,ds,ds)
+            show(_cL,cx-r,cy,ds,ds) show(_cR,cx+r,cy,ds,ds)
+        elseif shape=="Square" then
+            show(_sT,cx,cy-(s+g),s*2,t) show(_sB,cx,cy+(s+g),s*2,t)
+            show(_sL,cx-(s+g),cy,t,s*2) show(_sR,cx+(s+g),cy,t,s*2)
         end
     end
 
     AR2_hitmarkerFlag = false
 
-    local function showHitmarker()
-        local cam = workspace.CurrentCamera
-        if not cam then return end
-        local cx = cam.ViewportSize.X / 2
-        local cy = cam.ViewportSize.Y / 2
-        if AR2_CFG.hitmarker.rainbow then
-            hmRainbowHue = (hmRainbowHue + 15) % 360
-        end
-        applyShape(cx, cy)
-        hmActive  = true
-        hmEndTime = tick() + AR2_CFG.hitmarker.duration
-        playHmSound()
+    local function _show()
+        local cam=workspace.CurrentCamera if not cam then return end
+        if AR2_CFG.hitmarker.rainbow then _rainbowH=(_rainbowH+15)%360 end
+        _applyShape(cam.ViewportSize.X/2, cam.ViewportSize.Y/2)
+        _hmActive=true _hmEndTime=tick()+(AR2_CFG.hitmarker.duration or 0.3)
+        _playSound()
     end
 
     AR2_showHitmarker = function()
-        if AR2_CFG.hitmarker.enabled then AR2_hitmarkerFlag = true end
+        if AR2_CFG.hitmarker.enabled then AR2_hitmarkerFlag=true end
     end
 
     function AR2_toggleHitmarker(enabled)
-        AR2_CFG.hitmarker.enabled = enabled
-        if not enabled then
-            AR2_hitmarkerFlag = false
-            hideAll()
-            hmActive = false
-        end
+        AR2_CFG.hitmarker.enabled=enabled
+        if not enabled then AR2_hitmarkerFlag=false _hideAll() _hmActive=false end
     end
 
     AR2_RunService.RenderStepped:Connect(function()
-        if AR2_hitmarkerFlag then
-            AR2_hitmarkerFlag = false
-            showHitmarker()
-        end
-        if hmActive and tick() > hmEndTime then
-            hideAll()
-            hmActive = false
-        end
+        if AR2_hitmarkerFlag then AR2_hitmarkerFlag=false _show() end
+        if _hmActive and tick()>_hmEndTime then _hideAll() _hmActive=false end
     end)
-
-    AR2_HM_SOUND_NAMES = HM_SOUND_NAMES
-    AR2_HM_SHAPE_NAMES = SHAPE_NAMES
 end
 
 AR2_success, AR2_Bullets = pcall(function() return require(AR2_ReplicatedStorage.Client.Libraries.Bullets) end)
@@ -1869,37 +1838,36 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
 
             if AR2_tracersEnabled then AR2_addTracer(origin, direction) end
 
-            -- Hitmarker: raycast along bullet path + angle fallback
+            -- Hitmarker: raycast + angle fallback
             if AR2_CFG.hitmarker.enabled then
-                local rp = RaycastParams.new()
-                rp.FilterType = Enum.RaycastFilterType.Exclude
-                rp.FilterDescendantsInstances = { AR2_LocalPlayer.Character }
-                local hmHit = AR2_Workspace:Raycast(origin, direction * 2000, rp)
-                local detected = false
-                if hmHit and hmHit.Instance then
-                    local mdl = hmHit.Instance
-                    while mdl and not mdl:IsA("Model") do mdl = mdl.Parent end
-                    if mdl then
-                        detected = (AR2_Characters ~= nil and mdl.Parent == AR2_Characters)
-                            or (AR2_Zombies ~= nil and mdl.Parent == AR2_Zombies)
-                            or mdl:FindFirstChildOfClass("Humanoid") ~= nil
+                local _rp=RaycastParams.new()
+                _rp.FilterType=Enum.RaycastFilterType.Exclude
+                _rp.FilterDescendantsInstances={AR2_LocalPlayer.Character}
+                local _hit=AR2_Workspace:Raycast(origin,direction*2000,_rp)
+                local _det=false
+                if _hit and _hit.Instance then
+                    local _m=_hit.Instance
+                    while _m and not _m:IsA("Model") do _m=_m.Parent end
+                    if _m then
+                        _det=(AR2_Characters~=nil and _m.Parent==AR2_Characters)
+                            or(ZombiesFolder~=nil and _m.Parent==ZombiesFolder)
+                            or _m:FindFirstChildOfClass("Humanoid")~=nil
                     end
                 end
-                if not detected and AR2_Characters then
-                    for _, cm in ipairs(AR2_Characters:GetChildren()) do
-                        if cm ~= AR2_LocalPlayer.Character then
-                            local root = cm:FindFirstChild("HumanoidRootPart")
-                            if root then
-                                local toT = root.Position - origin
-                                if toT.Magnitude < 500 and direction:Dot(toT.Unit) > 0.97 then
-                                    detected = true
-                                    break
+                if not _det and AR2_Characters then
+                    for _,_cm in ipairs(AR2_Characters:GetChildren()) do
+                        if _cm~=AR2_LocalPlayer.Character then
+                            local _r=_cm:FindFirstChild("HumanoidRootPart")
+                            if _r then
+                                local _t=_r.Position-origin
+                                if _t.Magnitude<500 and direction:Dot(_t.Unit)>0.97 then
+                                    _det=true break
                                 end
                             end
                         end
                     end
                 end
-                if detected then AR2_hitmarkerFlag = true end
+                if _det then AR2_hitmarkerFlag=true end
             end
 
             return result
@@ -1913,48 +1881,63 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
 end
 
 -- =============================================
--- HITBOX EXPANDER
+-- HITBOX EXPANDER — CAMERA GLITCH METHOD
+-- Creates invisible enlarged head parts welded to each enemy.
+-- Raycasts hit the big invisible part, we redirect result
+-- to the real Head so damage registers correctly.
+-- Filter fix: removed the broken entityCount >= 2 check.
 -- =============================================
-AR2_hbeVisuals = {}
+
+AR2_hbeVisuals     = {}
 AR2_hbeHookInstalled = false
 
 local function AR2_hbeAddVisual(character)
     if AR2_hbeVisuals[character] then return end
     if character == AR2_LocalPlayer.Character then return end
     if not character:FindFirstChildOfClass("Humanoid") then return end
+
     local realHead = character:FindFirstChild("Head")
     if not realHead then return end
 
     local localRoot = AR2_localPosition()
-    local charRoot = character:FindFirstChild("HumanoidRootPart") or realHead
+    local charRoot  = character:FindFirstChild("HumanoidRootPart") or realHead
     if not charRoot then return end
     if (charRoot.Position - localRoot).Magnitude > 2000 then return end
 
+    -- The big invisible hitbox part
     local v = Instance.new("Part")
-    v.Name = "Head"
-    v.Size = Vector3.new(AR2_CFG.weapon.hbeSize, AR2_CFG.weapon.hbeSize, AR2_CFG.weapon.hbeSize)
-    v.Transparency = 0.5
-    v.Color = Color3.fromRGB(255, 180, 140)
-    v.Material = Enum.Material.Fabric
-    v.CanCollide = false
-    v.CanTouch = false
-    v.CanQuery = true
-    v.Massless = true
-    v.Anchored = false
-    v.CastShadow = false
-    v.CollisionGroupId = 2
+    v.Name         = "Head"
+    v.Size         = Vector3.new(
+        AR2_CFG.weapon.hbeSize,
+        AR2_CFG.weapon.hbeSize,
+        AR2_CFG.weapon.hbeSize
+    )
+    v.Transparency = 1         -- INVISIBLE — camera glitch method
+    v.CanCollide   = false
+    v.CanTouch     = false
+    v.CanQuery     = true      -- MUST be true — raycasts need to hit it
+    v.Massless     = true
+    v.Anchored     = false
+    v.CastShadow   = false
+
+    -- Head mesh so it matches the real head shape
     local mesh = Instance.new("SpecialMesh")
     mesh.MeshType = Enum.MeshType.Head
-    mesh.Scale = Vector3.new(1, 1, 1)
-    mesh.Parent = v
+    mesh.Scale    = Vector3.new(1, 1, 1)
+    mesh.Parent   = v
+
     v.Parent = character
     v.CFrame = realHead.CFrame
-    local weld = Instance.new("WeldConstraint")
-    weld.Part0 = realHead
-    weld.Part1 = v
+
+    -- Weld to real head so it follows perfectly
+    local weld  = Instance.new("WeldConstraint")
+    weld.Part0  = realHead
+    weld.Part1  = v
     weld.Parent = v
+
     AR2_hbeVisuals[character] = v
 
+    -- Keep wallbang from swallowing HBE hits
     AR2_RunService.Heartbeat:Connect(function()
         if not v or not v.Parent then return end
         if AR2_CFG.weapon.wallbang then
@@ -1964,6 +1947,7 @@ local function AR2_hbeAddVisual(character)
         end
     end)
 
+    -- Cleanup when character leaves
     character.AncestryChanged:Connect(function()
         if not character.Parent then
             if v and v.Parent then v:Destroy() end
@@ -1976,13 +1960,17 @@ function AR2_hbeScan()
     if not AR2_Characters then return end
     local localRoot = AR2_localPosition()
     for _, model in ipairs(AR2_Characters:GetChildren()) do
-        if model:IsA("Model") and model ~= AR2_LocalPlayer.Character and model:FindFirstChildOfClass("Humanoid") then
+        if model:IsA("Model")
+        and model ~= AR2_LocalPlayer.Character
+        and model:FindFirstChildOfClass("Humanoid") then
             local root = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Head")
-            if root and (root.Position - localRoot).Magnitude <= 2000 then
-                AR2_hbeAddVisual(model)
-            else
-                local visual = AR2_hbeVisuals[model]
-                if visual then visual:Destroy() AR2_hbeVisuals[model] = nil end
+            if root then
+                if (root.Position - localRoot).Magnitude <= 2000 then
+                    AR2_hbeAddVisual(model)
+                else
+                    local v = AR2_hbeVisuals[model]
+                    if v then v:Destroy() AR2_hbeVisuals[model] = nil end
+                end
             end
         end
     end
@@ -1998,7 +1986,11 @@ end
 function AR2_hbeUpdateSizes()
     for _, v in pairs(AR2_hbeVisuals) do
         if v and v.Parent then
-            v.Size = Vector3.new(AR2_CFG.weapon.hbeSize, AR2_CFG.weapon.hbeSize, AR2_CFG.weapon.hbeSize)
+            v.Size = Vector3.new(
+                AR2_CFG.weapon.hbeSize,
+                AR2_CFG.weapon.hbeSize,
+                AR2_CFG.weapon.hbeSize
+            )
         end
     end
 end
@@ -2006,60 +1998,77 @@ end
 function AR2_hbeInstallHook()
     if AR2_hbeHookInstalled then return end
     AR2_hbeHookInstalled = true
+
     local mt = getrawmetatable(game)
     local originalNC = mt.__namecall
     setreadonly(mt, false)
+
     mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
 
-        -- HBE Raycast interception (with fixed filter)
+        -- RAYCAST INTERCEPT
         if method == "Raycast" and self == workspace and AR2_CFG.weapon.hbeOn then
             local origin, direction, params = ...
+
             if typeof(origin) == "Vector3" and params and typeof(params) == "RaycastParams" then
                 local filter = params.FilterDescendantsInstances
+
                 if filter and #filter >= 1 then
                     local hasChars = false
-                    local entityCount = 0
                     for _, inst in ipairs(filter) do
-                        if inst.Name == "Characters" and inst.ClassName == "Folder" then hasChars = true end
-                        if inst.Name == "Zombies" or inst.Name == "Corpses" or inst.Name == "Characters" then entityCount = entityCount + 1 end
+                        if inst.Name == "Characters" and inst.ClassName == "Folder" then
+                            hasChars = true
+                            break
+                        end
                     end
-                    if hasChars then   -- removed 'and entityCount >= 2'
+
+                    -- FIX: was "hasChars and entityCount >= 2" — that broke everything
+                    -- Now: just check hasChars and remove Characters from the filter
+                    if hasChars then
                         local cleaned = {}
                         for _, inst in ipairs(filter) do
-                            if inst.Name ~= "Characters" then table.insert(cleaned, inst) end
+                            if inst.Name ~= "Characters" then
+                                table.insert(cleaned, inst)
+                            end
                         end
                         params.FilterDescendantsInstances = cleaned
                     end
                 end
             end
+
             local result = originalNC(self, ...)
+
+            -- Redirect HBE part hit → real Head
             if result and result.Instance then
                 for char, fakeHead in pairs(AR2_hbeVisuals) do
-                    local hit = result.Instance
-                    local posMatch = fakeHead and fakeHead.Parent and
-                        (fakeHead.Position - result.Position).Magnitude < AR2_CFG.weapon.hbeSize * 0.75
-                    if hit == fakeHead or posMatch then
-                        local realHead = char:FindFirstChild("Head")
-                        if realHead then
-                            return {
-                                Instance = realHead,
-                                Position = result.Position,
-                                Normal   = result.Normal,
-                                Material = result.Material,
-                                Distance = result.Distance,
-                            }
+                    if fakeHead and fakeHead.Parent then
+                        local posMatch = (fakeHead.Position - result.Position).Magnitude
+                            < AR2_CFG.weapon.hbeSize * 0.75
+                        if result.Instance == fakeHead or posMatch then
+                            local realHead = char:FindFirstChild("Head")
+                            if realHead then
+                                return {
+                                    Instance = realHead,
+                                    Position = result.Position,
+                                    Normal   = result.Normal,
+                                    Material = result.Material,
+                                    Distance = result.Distance,
+                                }
+                            end
                         end
                     end
                 end
             end
+
             return result
         end
 
         return originalNC(self, ...)
     end)
+
     setreadonly(mt, true)
 
+    -- Watch for new players joining
     if AR2_Characters then
         AR2_Characters.ChildAdded:Connect(function(model)
             if model:IsA("Model") and AR2_CFG.weapon.hbeOn then
@@ -2069,22 +2078,153 @@ function AR2_hbeInstallHook()
         end)
     end
 
+    -- Re-scan every 2 seconds for anyone we missed
     task.spawn(function()
         while true do
             task.wait(2)
-            if AR2_CFG.weapon.hbeOn then AR2_hbeScan() end
+            if AR2_CFG.weapon.hbeOn then
+                pcall(AR2_hbeScan)
+            end
         end
     end)
 end
 
 function AR2_hbeSetEnabled(enabled)
     AR2_CFG.weapon.hbeOn = enabled
-    if enabled then AR2_hbeInstallHook() AR2_hbeScan() else AR2_hbeRemoveAll() end
+    if enabled then
+        AR2_hbeInstallHook()
+        AR2_hbeScan()
+    else
+        AR2_hbeRemoveAll()
+    end
 end
 
 -- =============================================
--- COSMETIC UNLOCKER (camera‑local clone system)
+-- REMOVE TEXTURES (with 20s periodic rescan)
 -- =============================================
+local AR2_textureUpdateConn = nil
+local AR2_textureLastScan = 0
+local AR2_savedTextures = {}
+
+local function AR2_scanTextures()
+    for _, obj in ipairs(AR2_Workspace:GetDescendants()) do
+        if (obj:IsA("Texture") or obj:IsA("Decal")) and obj.Transparency < 1 and not AR2_savedTextures[obj] then
+            AR2_savedTextures[obj] = obj.Transparency
+            obj.Transparency = 1
+        end
+    end
+end
+
+function AR2_toggleRemoveTextures(enabled)
+    AR2_CFG.misc.removeTextures = enabled
+    if enabled then
+        AR2_scanTextures()
+        if not AR2_textureUpdateConn then
+            AR2_textureUpdateConn = AR2_RunService.Heartbeat:Connect(function()
+                local now = os.clock()
+                if now - AR2_textureLastScan >= 20 then
+                    AR2_textureLastScan = now
+                    AR2_scanTextures()
+                end
+            end)
+        end
+    else
+        if AR2_textureUpdateConn then
+            AR2_textureUpdateConn:Disconnect()
+            AR2_textureUpdateConn = nil
+        end
+        for obj, t in pairs(AR2_savedTextures) do
+            if obj and obj.Parent then obj.Transparency = t end
+        end
+        AR2_savedTextures = {}
+        AR2_textureLastScan = 0
+    end
+end
+
+-- =============================================
+-- REMOVE LEAVES
+-- =============================================
+local AR2_leaveConn = nil
+local AR2_leaveSaved = {}
+
+local function AR2_applyLeafTransparency(part)
+    if not AR2_leaveSaved[part] then AR2_leaveSaved[part] = part.Transparency end
+    part.Transparency = 1
+end
+
+local function AR2_scanLeaves()
+    local mapElements = AR2_Workspace:FindFirstChild("Map") and AR2_Workspace.Map:FindFirstChild("Elements")
+    if not mapElements then return end
+    for _, part in ipairs(mapElements:GetDescendants()) do
+        if part.Name == "Fronds" or part.Name == "Leaves" or part.Name == "PineLeaves" then
+            AR2_applyLeafTransparency(part)
+        end
+    end
+end
+
+function AR2_toggleRemoveLeaves(enabled)
+    AR2_CFG.misc.removeLeaves = enabled
+    if enabled then
+        AR2_scanLeaves()
+        if not AR2_leaveConn then
+            local mapElements = AR2_Workspace:FindFirstChild("Map") and AR2_Workspace.Map:FindFirstChild("Elements")
+            if mapElements then
+                AR2_leaveConn = mapElements.DescendantAdded:Connect(function(part)
+                    if part.Name == "Fronds" or part.Name == "Leaves" or part.Name == "PineLeaves" then
+                        task.wait()
+                        AR2_applyLeafTransparency(part)
+                    end
+                end)
+            end
+        end
+    else
+        if AR2_leaveConn then
+            AR2_leaveConn:Disconnect()
+            AR2_leaveConn = nil
+        end
+        for part, orig in pairs(AR2_leaveSaved) do
+            if part.Parent then part.Transparency = orig end
+        end
+        AR2_leaveSaved = {}
+    end
+end
+
+-- =============================================
+-- REMOVE BUSHES
+-- =============================================
+local AR2_bushRemoved = {}
+
+local function AR2_removeBushes()
+    local mapElements = AR2_Workspace:FindFirstChild("Map") and AR2_Workspace.Map:FindFirstChild("Elements")
+    if not mapElements then return end
+    local function scan(parent)
+        for _, child in ipairs(parent:GetChildren()) do
+            if child.Name:find("Foliage") or child.Name:find("Shrub") then
+                AR2_bushRemoved[child] = child.Parent
+                child.Parent = nil
+            else
+                scan(child)
+            end
+        end
+    end
+    scan(mapElements)
+end
+
+local function AR2_restoreBushes()
+    for child, parent in pairs(AR2_bushRemoved) do
+        if child and parent then child.Parent = parent end
+    end
+    AR2_bushRemoved = {}
+end
+
+function AR2_toggleRemoveBushes(enabled)
+    AR2_CFG.misc.removeBushes = enabled
+    if enabled then
+        AR2_removeBushes()
+    else
+        AR2_restoreBushes()
+    end
+end
 do
     local _BODY = {
         HumanoidRootPart=true,Head=true,UpperTorso=true,LowerTorso=true,
@@ -2262,9 +2402,6 @@ do
     end
 end
 
--- =============================================
--- FREEZE ZOMBIES
--- =============================================
 AR2_freeze = { running = false, held = 0, near = 0, note = "off", lastUpdate = 0 }
 AR2_freezeConn = nil
 AR2_frozen = {}
@@ -2725,29 +2862,23 @@ function AR2_toggleRespawnTP(enabled)
         end)
     end
 end
-
--- NOCLIP
 AR2_noclipConn = nil
 AR2_noclipKeys = {W=false,A=false,S=false,D=false,Space=false,LeftControl=false}
 local noclipParts = {}
 local noclipOffsets = {}
 local noclipRootPart = nil
 local isSitting = false
-
 function AR2_startNoclip()
     if AR2_noclipConn then return end
     local char = AR2_LocalPlayer.Character
     if not char then return end
     local hum = char:FindFirstChild("Humanoid")
     if not hum then return end
-
     hum.Sit = true
     hum.PlatformStand = true
     isSitting = true
-
     local root = char:FindFirstChild("HumanoidRootPart")
     if not root then return end
-
     local parts = {}
     local radius = 15
     for _, obj in ipairs(AR2_Workspace:GetDescendants()) do
@@ -2877,7 +3008,6 @@ function AR2_stopInfJump()
     if AR2_infJumpConn then AR2_infJumpConn:Disconnect() AR2_infJumpConn = nil end
 end
 
--- FLY TO PLAYER
 function AR2_flyToPlayer(targetPlayer)
     if not targetPlayer or not targetPlayer.Character then return end
     local char = AR2_LocalPlayer.Character
@@ -2913,7 +3043,6 @@ function AR2_flyToPlayer(targetPlayer)
     end
 end
 
--- CAR
 AR2_car = { busy = false, cancel = false, gen = 0, lastResult = "", target = nil }
 
 function AR2_carBase(model) return model and (model:FindFirstChild("Base") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")) end
@@ -3027,7 +3156,6 @@ function AR2_car.toCursor(mode)
     if mode == "desync" then AR2_car.desyncTo(goal, "to cursor") else AR2_car.rewriteTo(goal, "to cursor") end
 end
 
--- MAP
 do
     AR2_MAP_ORIGIN = CFrame.new(Vector3.new(-7349.55, 0, -6187.35), Vector3.new(-7349.55, 0, -6186.35))
     AR2_MAP_SX, AR2_MAP_SZ = -13499.068, -12386.184
@@ -3265,7 +3393,6 @@ do
     function AR2_radar.destroy() AR2_radar.stop() radarLayer, radarMarker = nil, nil radarNextScan = 0 end
 end
 
--- SPEED
 AR2_speed = { enabled = false, resets = 0, lastReset = nil }
 AR2_speedConn = nil
 AR2_lastPosition = nil
@@ -3337,7 +3464,6 @@ function AR2_stepSpeed(dt)
     root.CFrame = root.CFrame + dir * extra
     AR2_lastPosition = root.Position
 end
-
 function AR2_speed.start()
     if AR2_speedConn then return end
     AR2_speed.enabled = true
@@ -3349,58 +3475,6 @@ function AR2_speed.stop()
     if AR2_speedConn then AR2_speedConn:Disconnect() AR2_speedConn = nil end
 end
 
--- RAGE BOT
-local AR2_rageBotConn = nil
-local AR2_rageBotHolding = false
-
-local function AR2_rageBotTarget()
-    local c = AR2_CFG.rageBot
-
-    if c.protection then
-        local origin = AR2_localPosition()
-        local best, bestDist = nil, c.protectionRadius
-        local pool = {}
-        if c.players then for _, e in ipairs(AR2_api.players()) do pool[#pool+1] = e end end
-        if c.zombies then for _, e in ipairs(AR2_api.zombies()) do pool[#pool+1] = e end end
-        for _, entity in ipairs(pool) do
-            if entity.distance < bestDist then best, bestDist = entity, entity.distance end
-        end
-        if best then return best end
-    end
-
-    local pool = {}
-    if c.players then for _, e in ipairs(AR2_api.players()) do pool[#pool+1] = e end end
-    if c.zombies then for _, e in ipairs(AR2_api.zombies()) do pool[#pool+1] = e end end
-
-    local best, bestDist = nil, c.maxDist
-    for _, entity in ipairs(pool) do
-        if entity.distance < bestDist then best, bestDist = entity, entity.distance end
-    end
-    return best
-end
-
-function AR2_rageBotSetEnabled(enabled)
-    AR2_CFG.rageBot.on = enabled
-    if AR2_rageBotConn then AR2_rageBotConn:Disconnect() AR2_rageBotConn = nil end
-    if AR2_rageBotHolding then pcall(mouse1release) AR2_rageBotHolding = false end
-    if not enabled then return end
-
-    AR2_rageBotConn = AR2_RunService.Heartbeat:Connect(function()
-        if not AR2_CFG.rageBot.on then return end
-        local adsHeld = AR2_UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-        local protectionActive = AR2_CFG.rageBot.protection and AR2_rageBotTarget() ~= nil
-        if AR2_CFG.rageBot.requireADS and not adsHeld and not protectionActive then
-            if AR2_rageBotHolding then pcall(mouse1release) AR2_rageBotHolding = false end
-            return
-        end
-        local target = AR2_rageBotTarget()
-        if target then
-            if not AR2_rageBotHolding then AR2_rageBotHolding = true pcall(mouse1press) end
-        else
-            if AR2_rageBotHolding then AR2_rageBotHolding = false pcall(mouse1release) end
-        end
-    end)
-end
 
 -- CAR MODS
 AR2_carMods = { running = false, touched = 0, note = "off" }
@@ -3886,83 +3960,7 @@ function AR2_tracersStart() end
 function AR2_tracersStop() end
 function AR2_tracersUpdate() AR2_tracersEnabled = AR2_CFG.misc.tracers end
 
--- TEXTURES/TREES
-local AR2_savedTextures = {}
-function AR2_toggleRemoveTextures(enabled)
-    AR2_CFG.misc.removeTextures = enabled
-    if enabled then
-        for _, obj in ipairs(AR2_Workspace:GetDescendants()) do
-            if (obj:IsA("Texture") or obj:IsA("Decal")) and obj.Transparency < 1 then
-                AR2_savedTextures[obj] = obj.Transparency
-                obj.Transparency = 1
-            end
-        end
-    else
-        for obj, t in pairs(AR2_savedTextures) do
-            if obj and obj.Parent then obj.Transparency = t end
-        end
-        AR2_savedTextures = {}
-    end
-end
-
-local AR2_hiddenTrees = {}
-local AR2_treeUpdateConn = nil
-local AR2_treeLastUpdate = 0
-
-local function AR2_applyTreeTransparency(part)
-    if not AR2_hiddenTrees[part] then AR2_hiddenTrees[part] = part.LocalTransparencyModifier end
-    part.LocalTransparencyModifier = 0.9
-end
-
-local function AR2_refreshTreesInRadius()
-    if not AR2_CFG.misc.removeTrees then return end
-    local playerPos = AR2_localPosition()
-    local radius = 1000
-    local nearbyParts = AR2_Workspace:GetPartBoundsInRadius(playerPos, radius)
-    for _, part in ipairs(nearbyParts) do
-        local model = part.Parent
-        while model and not model:IsA("Model") do model = model.Parent end
-        if model then
-            local name = model.Name:lower()
-            if name:find("tree") or name:find("bush") or name:find("shrub") or name:find("foliage") then
-                for _, descendant in ipairs(model:GetDescendants()) do
-                    if descendant:IsA("BasePart") then AR2_applyTreeTransparency(descendant) end
-                end
-            end
-        end
-    end
-end
-
-function AR2_toggleRemoveTrees(enabled)
-    AR2_CFG.misc.removeTrees = enabled
-    if enabled then
-        for _, obj in ipairs(AR2_Workspace:GetDescendants()) do
-            local name = obj.Name:lower()
-            if obj:IsA("Model") and (name:find("tree") or name:find("bush") or name:find("shrub") or name:find("foliage")) then
-                for _, part in ipairs(obj:GetDescendants()) do
-                    if part:IsA("BasePart") then AR2_applyTreeTransparency(part) end
-                end
-            end
-        end
-        if not AR2_treeUpdateConn then
-            AR2_treeUpdateConn = AR2_RunService.Heartbeat:Connect(function()
-                local now = os.clock()
-                if now - AR2_treeLastUpdate >= 20 then
-                    AR2_treeLastUpdate = now
-                    pcall(AR2_refreshTreesInRadius)
-                end
-            end)
-        end
-    else
-        if AR2_treeUpdateConn then AR2_treeUpdateConn:Disconnect() AR2_treeUpdateConn = nil end
-        for part, orig in pairs(AR2_hiddenTrees) do
-            if part.Parent then part.LocalTransparencyModifier = orig end
-        end
-        table.clear(AR2_hiddenTrees)
-    end
-end
-
--- Hide Player
+-- HIDE PLAYER / GUN (unchanged)
 local AR2_hidePlayerOriginal = {}
 function AR2_toggleHidePlayer(enabled)
     AR2_CFG.misc.hidePlayer = enabled
@@ -3985,7 +3983,6 @@ function AR2_toggleHidePlayer(enabled)
     end
 end
 
--- Hide Gun (continuous)
 local AR2_hideGunOriginal = {}
 local AR2_hideGunConn = nil
 function AR2_findGunModel()
@@ -4030,7 +4027,7 @@ function AR2_toggleHideGun(enabled)
     end
 end
 
--- Skybox (only Default and Space)
+-- SKYBOX
 local AR2_skyboxCache = {}
 function AR2_applySkybox(skyboxName)
     AR2_CFG.visuals.skybox = skyboxName
@@ -4052,24 +4049,87 @@ function AR2_applySkybox(skyboxName)
         AR2_Lighting.FogStart = AR2_skyboxCache.original.FogStart
         AR2_Lighting.FogEnd = AR2_skyboxCache.original.FogEnd
         AR2_Lighting.ClockTime = AR2_skyboxCache.original.ClockTime
-    elseif skyboxName == "Space" then
-        AR2_Lighting.Ambient = Color3.new(0.5, 0.5, 0.5)
-        AR2_Lighting.OutdoorAmbient = Color3.new(0.8, 0.8, 0.8)
-        AR2_Lighting.FogColor = Color3.new(0.5, 0.5, 0.5)
-        AR2_Lighting.FogStart = 0
-        AR2_Lighting.FogEnd = 1000
-        AR2_Lighting.ClockTime = 0
-        local sky = Instance.new("Sky")
-        sky.Name = "SpaceSky"
-        sky.SkyboxBk = "rbxassetid://159454299" sky.SkyboxDn = "rbxassetid://159454299"
-        sky.SkyboxFt = "rbxassetid://159454299" sky.SkyboxLf = "rbxassetid://159454299"
-        sky.SkyboxRt = "rbxassetid://159454299" sky.SkyboxUp = "rbxassetid://159454299"
-        sky.Parent = AR2_Lighting
-        AR2_customSky = sky
+    else
+        local skyboxes = {
+            ["Space"] = {
+                Bk = "rbxassetid://159454299", Dn = "rbxassetid://159454299",
+                Ft = "rbxassetid://159454299", Lf = "rbxassetid://159454299",
+                Rt = "rbxassetid://159454299", Up = "rbxassetid://159454299"
+            },
+            ["Galaxy"] = {
+                Bk = "http://www.roblox.com/asset/?id=149397692", Dn = "http://www.roblox.com/asset/?id=149397686",
+                Ft = "http://www.roblox.com/asset/?id=149397697", Lf = "http://www.roblox.com/asset/?id=149397684",
+                Rt = "http://www.roblox.com/asset/?id=149397688", Up = "http://www.roblox.com/asset/?id=149397702"
+            },
+            ["Galaxy 2"] = {
+                Bk = "http://www.roblox.com/asset/?id=155441936", Dn = "http://www.roblox.com/asset/?id=155441802",
+                Ft = "http://www.roblox.com/asset/?id=155441818", Lf = "http://www.roblox.com/asset/?id=155441777",
+                Rt = "http://www.roblox.com/asset/?id=155441874", Up = "http://www.roblox.com/asset/?id=155441905"
+            },
+            ["Galaxy 3"] = {
+                Bk = "rbxassetid://135908594667929", Dn = "rbxassetid://139584143501514",
+                Ft = "rbxassetid://92947876187368", Lf = "rbxassetid://72493016739936",
+                Rt = "rbxassetid://81731245279712", Up = "rbxassetid://88174897344210"
+            },
+            ["Saturne"] = {
+                Bk = "rbxassetid://1898724755", Dn = "rbxassetid://1898727189",
+                Ft = "rbxassetid://1898722814", Lf = "rbxassetid://1898729298",
+                Rt = "rbxassetid://1898741025", Up = "rbxassetid://1898736761"
+            },
+            ["Neptune"] = {
+                Bk = "rbxassetid://218955819", Dn = "rbxassetid://218953419",
+                Ft = "rbxassetid://218954524", Lf = "rbxassetid://218958493",
+                Rt = "rbxassetid://218957134", Up = "rbxassetid://218950090"
+            },
+            ["Redshift"] = {
+                Bk = "rbxassetid://401664839", Dn = "rbxassetid://401664862",
+                Ft = "rbxassetid://401664960", Lf = "rbxassetid://401664881",
+                Rt = "rbxassetid://401664901", Up = "rbxassetid://401664936"
+            },
+            ["Pink Daylights"] = {
+                Bk = "rbxassetid://11555017034", Dn = "rbxassetid://11555013415",
+                Ft = "rbxassetid://11555010145", Lf = "rbxassetid://11555006545",
+                Rt = "rbxassetid://11555000712", Up = "rbxassetid://11554996247"
+            },
+            ["Purple Night"] = {
+                Bk = "rbxassetid://17279854976", Dn = "rbxassetid://17279856318",
+                Ft = "rbxassetid://17279858447", Lf = "rbxassetid://17279860360",
+                Rt = "rbxassetid://17279862234", Up = "rbxassetid://17279864507"
+            },
+            ["Gray Night"] = {
+                Bk = "rbxassetid://1618912481", Dn = "rbxassetid://1618913943",
+                Ft = "rbxassetid://1618913244", Lf = "rbxassetid://1618912849",
+                Rt = "rbxassetid://1618911568", Up = "rbxassetid://1618913654"
+            },
+            ["Anime Sky"] = {
+                Bk = "rbxassetid://18351376859", Dn = "rbxassetid://18351374919",
+                Ft = "rbxassetid://18351376800", Lf = "rbxassetid://18351376469",
+                Rt = "rbxassetid://18351376457", Up = "rbxassetid://18351377189"
+            }
+        }
+        local data = skyboxes[skyboxName]
+        if data then
+            AR2_Lighting.Ambient = Color3.new(0.5, 0.5, 0.5)
+            AR2_Lighting.OutdoorAmbient = Color3.new(0.8, 0.8, 0.8)
+            AR2_Lighting.FogColor = Color3.new(0.5, 0.5, 0.5)
+            AR2_Lighting.FogStart = 0
+            AR2_Lighting.FogEnd = 1000
+            AR2_Lighting.ClockTime = 0
+            local sky = Instance.new("Sky")
+            sky.Name = skyboxName
+            sky.SkyboxBk = data.Bk
+            sky.SkyboxDn = data.Dn
+            sky.SkyboxFt = data.Ft
+            sky.SkyboxLf = data.Lf
+            sky.SkyboxRt = data.Rt
+            sky.SkyboxUp = data.Up
+            sky.Parent = AR2_Lighting
+            AR2_customSky = sky
+        end
     end
 end
 
--- FOV ZOOM (hold left click)
+-- FOV ZOOM
 local AR2_fovZoomConn = nil
 local AR2_fovZoomOriginal = nil
 AR2_zoomFOV = AR2_CFG.misc.zoomFOV
@@ -4092,7 +4152,7 @@ function AR2_toggleFOVZoom(enabled)
     end)
 end
 
--- SIMPLE DISTANCE ZOOM (custom third-person camera using current look direction)
+-- DISTANCE ZOOM
 local AR2_distZoomConn = nil
 local AR2_distZoomActive = AR2_CFG.misc.distZoomActive or false
 local AR2_normalDist = AR2_CFG.misc.normalDist
@@ -4240,7 +4300,6 @@ local function AR2_createHitmarker()
     end
 end
 
--- The GUI hitmarker is already defined; this function is kept for compatibility but unused.
 AR2_showHitmarker = AR2_showHitmarker or function() end
 
 function AR2_toggleHitmarker(enabled)
@@ -4514,7 +4573,11 @@ if WindUI then
     addToggle(rageBotSection, "Target Zombies", AR2_CFG.rageBot, "zombies")
     addSlider(rageBotSection, "Max Distance", AR2_CFG.rageBot, "maxDist", 100, 3000)
     addToggle(rageBotSection, "Require ADS (Right Click)", AR2_CFG.rageBot, "requireADS", function(v) AR2_CFG.rageBot.requireADS = v end)
-    addToggle(rageBotSection, "Protection Mode", AR2_CFG.rageBot, "protection", function(v) AR2_CFG.rageBot.protection = v end)
+    addToggle(rageBotSection, "Protection Mode (360°)", AR2_CFG.rageBot, "protection", function(v)
+        AR2_CFG.rageBot.protection = v
+        AR2_CFG.magicAim.ignoreFov = v
+        AR2_magicUpdate()
+    end)
     addSlider(rageBotSection, "Protection Radius", AR2_CFG.rageBot, "protectionRadius", 10, 200)
 
     local weaponModsSection = combatTab:Section({ Title = "Weapon Mods", Box = false })
@@ -4522,6 +4585,7 @@ if WindUI then
     addToggle(weaponModsSection, "Wallbang", AR2_CFG.weapon, "wallbang", function(v) if v then startWallbangTagging() else stopWallbangTagging() end end)
     addToggle(weaponModsSection, "All Fire Modes", AR2_CFG.weapon, "allFireModes", function(v) AR2_applyAllFireModes(v) end)
     addToggle(weaponModsSection, "Instant Reload", AR2_CFG.weapon, "instantReload", function(v) setInstantReloadEnabled(v) end)
+    addToggle(weaponModsSection, "Auto Reload", AR2_CFG.weapon, "autoReload", function(v) AR2_setAutoReload(v) end)
     addSlider(weaponModsSection, "Recoil Reduction %", AR2_CFG.weapon, "recoilReduction", 0, 100)
     addToggle(weaponModsSection, "Hitbox Expander", AR2_CFG.weapon, "hbeOn", function(v) AR2_hbeSetEnabled(v) end)
     addSlider(weaponModsSection, "HBE Size", AR2_CFG.weapon, "hbeSize", 1, 12, function(v) AR2_hbeUpdateSizes() end)
@@ -4538,15 +4602,15 @@ if WindUI then
     local hmSection = combatTab:Section({ Title = "Hitmarker", Box = false })
     addToggle(hmSection, "Enabled", AR2_CFG.hitmarker, "enabled", function(v) AR2_toggleHitmarker(v) end)
     addToggle(hmSection, "Rainbow Color", AR2_CFG.hitmarker, "rainbow", function(v) AR2_CFG.hitmarker.rainbow = v AR2_markDirty() end)
-    addDropdown(hmSection, "Shape", AR2_HM_SHAPE_NAMES or {"X","+","Dot","Diamond","Circle","Square"}, AR2_CFG.hitmarker.shape, function(v) AR2_CFG.hitmarker.shape = v AR2_markDirty() end)
-    addDropdown(hmSection, "Sound", AR2_HM_SOUND_NAMES or {"None","Hit Marker","HitMarker 17","Classic Ding","Tick","Warm Ding","Sharp Ping","Game"}, AR2_CFG.hitmarker.sound, function(v) AR2_CFG.hitmarker.sound = v AR2_markDirty() end)
-    addSlider(hmSection, "Color Hue", AR2_CFG.hitmarker, "colorHue", 0, 360)
-    addSlider(hmSection, "Size", AR2_CFG.hitmarker, "size", 5, 80)
-    addSlider(hmSection, "Thickness", AR2_CFG.hitmarker, "thickness", 1, 10)
-    addSlider(hmSection, "Gap (X and +)", AR2_CFG.hitmarker, "gap", 0, 30)
-    addSlider(hmSection, "Opacity %", AR2_CFG.hitmarker, "opacity", 0, 1)
-    addSlider(hmSection, "Duration (s)", AR2_CFG.hitmarker, "duration", 0.05, 1.5)
-    addSlider(hmSection, "Volume", AR2_CFG.misc, "hitSoundVolume", 0, 100)
+    addDropdown(hmSection, "Shape", AR2_HM_SHAPE_NAMES or {"X","+","Dot","Diamond","Circle","Square"}, AR2_CFG.hitmarker, "shape", function(v) AR2_CFG.hitmarker.shape = v AR2_markDirty() end)
+    addDropdown(hmSection, "Sound", AR2_HM_SOUND_NAMES or {"None","Hit Marker","HitMarker 17","Classic Ding","Tick","Warm Ding","Sharp Ping","Game"}, AR2_CFG.hitmarker, "sound", function(v) AR2_CFG.hitmarker.sound = v AR2_markDirty() end)
+    addSlider(hmSection, "Color Hue", AR2_CFG.hitmarker, "colorHue", 0, 360, function(v) AR2_CFG.hitmarker.colorHue = v end)
+    addSlider(hmSection, "Size", AR2_CFG.hitmarker, "size", 5, 80, function(v) AR2_CFG.hitmarker.size = v end)
+    addSlider(hmSection, "Thickness", AR2_CFG.hitmarker, "thickness", 1, 10, function(v) AR2_CFG.hitmarker.thickness = v end)
+    addSlider(hmSection, "Gap (X and +)", AR2_CFG.hitmarker, "gap", 0, 30, function(v) AR2_CFG.hitmarker.gap = v end)
+    addSlider(hmSection, "Opacity", AR2_CFG.hitmarker, "opacity", 0, 1, 0.01, function(v) AR2_CFG.hitmarker.opacity = v end)
+    addSlider(hmSection, "Duration (s)", AR2_CFG.hitmarker, "duration", 0.05, 1.5, 0.05, function(v) AR2_CFG.hitmarker.duration = v end)
+    addSlider(hmSection, "Volume", AR2_CFG.misc, "hitSoundVolume", 0, 100, function(v) AR2_CFG.misc.hitSoundVolume = v end)
 
     -- Crosshair Section
     local crosshairSection = combatTab:Section({ Title = "Custom Crosshair", Box = false })
@@ -4673,6 +4737,14 @@ if WindUI then
     addToggle(hideSection, "Hide Player", AR2_CFG.misc, "hidePlayer", function(v) AR2_toggleHidePlayer(v) end)
     addToggle(hideSection, "Hide Gun", AR2_CFG.misc, "hideGun", function(v) AR2_toggleHideGun(v) end)
 
+    -- Extras
+    local extrasSection = miscTab:Section({ Title = "Extras", Box = false })
+    addToggle(extrasSection, "Self Backtrack", AR2_CFG.misc.selfBacktrack, "enabled", function(v) AR2_setSelfBacktrack(v) end)
+    addToggle(extrasSection, "Jump Circle", AR2_CFG.misc.jumpCircle, "enabled", function(v) AR2_setJumpCircle(v) end)
+    addToggle(extrasSection, "Instant Interact", AR2_CFG.misc, "instantInteract", function(v) AR2_setInstantInteract(v) end)
+    addToggle(extrasSection, "Container Persistence", AR2_CFG.misc, "containerPersistence", function(v) AR2_setContainerPersistence(v) end)
+    addToggle(extrasSection, "Player Jesus", AR2_CFG.misc, "playerJesus", function(v) AR2_setPlayerJesus(v) end)
+
     -- Cosmetics Tab
     local cosTab = Window:Tab({ Title = "Cosmetics", Icon = "sparkles" })
     local cosSection = cosTab:Section({ Title = "Cosmetic Unlocker", Box = false })
@@ -4690,11 +4762,39 @@ if WindUI then
     addToggle(lightingSection, "Set Time", AR2_CFG.visuals, "setTime", function(v) AR2_visuals.apply() end)
     addSlider(lightingSection, "Brightness", AR2_CFG.visuals, "brightness", 0, 10, function(v) AR2_visuals.apply() end)
     addSlider(lightingSection, "Time", AR2_CFG.visuals, "time", 0, 24, function(v) AR2_visuals.apply() end)
-    addDropdown(lightingSection, "Skybox", {"Default", "Space"}, AR2_CFG.visuals, "skybox", function(v) AR2_applySkybox(v) end)
+    addDropdown(lightingSection, "Skybox", {"Default", "Space", "Galaxy", "Galaxy 2", "Galaxy 3", "Saturne", "Neptune", "Redshift", "Pink Daylights", "Purple Night", "Gray Night", "Anime Sky"}, AR2_CFG.visuals, "skybox", function(v) AR2_applySkybox(v) end)
+
+    -- Clouds section
+    local cloudsSection = worldTab:Section({ Title = "Clouds", Box = false })
+    addToggle(cloudsSection, "Enable Clouds", AR2_CFG.visuals, "cloudsEnabled", function(v) AR2_setClouds(v, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, AR2_CFG.visuals.cloudsDensity) end)
+    addToggle(cloudsSection, "Modify Clouds", AR2_CFG.visuals, "modifyClouds", function(v) AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, v, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, AR2_CFG.visuals.cloudsDensity) end)
+    if WindUI.ColorPicker then
+        local cloudColor = cloudsSection:ColorPicker({
+            Title = "Cloud Color",
+            Value = AR2_CFG.visuals.cloudsColor,
+            Callback = function(v)
+                AR2_CFG.visuals.cloudsColor = v
+                AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, AR2_CFG.visuals.modifyClouds, v, AR2_CFG.visuals.cloudsCover, AR2_CFG.visuals.cloudsDensity)
+            end,
+        })
+    end
+    addSlider(cloudsSection, "Cloud Cover", AR2_CFG.visuals, "cloudsCover", 0, 1, 0.01, function(v) AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, v, AR2_CFG.visuals.cloudsDensity) end)
+    addSlider(cloudsSection, "Cloud Density", AR2_CFG.visuals, "cloudsDensity", 0, 1, 0.01, function(v) AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, v) end)
+
+    -- Color correction
+    local ccSection = worldTab:Section({ Title = "Color Correction", Box = false })
+    addToggle(ccSection, "Enable Color Correction", AR2_CFG.visuals, "colorCorrectionEnabled", function(v) AR2_setColorCorrection(v, AR2_CFG.visuals.ccSaturation, AR2_CFG.visuals.ccContrast, AR2_CFG.visuals.ccBrightness) end)
+    addSlider(ccSection, "Saturation", AR2_CFG.visuals, "ccSaturation", 0, 2, 0.1, function(v) AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, v, AR2_CFG.visuals.ccContrast, AR2_CFG.visuals.ccBrightness) end)
+    addSlider(ccSection, "Contrast", AR2_CFG.visuals, "ccContrast", 0, 1, 0.1, function(v) AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, AR2_CFG.visuals.ccSaturation, v, AR2_CFG.visuals.ccBrightness) end)
+    addSlider(ccSection, "Brightness", AR2_CFG.visuals, "ccBrightness", 0.2, 2, 0.1, function(v) AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, AR2_CFG.visuals.ccSaturation, AR2_CFG.visuals.ccContrast, v) end)
+
+    -- Remove shadows
+    addToggle(lightingSection, "Remove Shadows", AR2_CFG.misc, "removeShadows", function(v) AR2_setRemoveShadows(v) end)
 
     local removeSection = worldTab:Section({ Title = "Performance", Box = false })
     addToggle(removeSection, "Remove Textures", AR2_CFG.misc, "removeTextures", function(v) AR2_toggleRemoveTextures(v) end)
-    addToggle(removeSection, "Remove Trees", AR2_CFG.misc, "removeTrees", function(v) AR2_toggleRemoveTrees(v) end)
+    addToggle(removeSection, "Remove Leaves", AR2_CFG.misc, "removeLeaves", function(v) AR2_toggleRemoveLeaves(v) end)
+    addToggle(removeSection, "Remove Bushes", AR2_CFG.misc, "removeBushes", function(v) AR2_toggleRemoveBushes(v) end)
 
     -- Cars Tab
     local carsTab = Window:Tab({ Title = "Cars", Icon = "car" })
@@ -5006,6 +5106,350 @@ function AR2_setPersonalGun(enabled, mode, hue, gray, materialStr, rainbow)
     end)
 end
 
+-- Additional features from the original extracted snippets, integrated into AR2
+
+-- Auto Reload (press R when magazine empty)
+local AR2_autoReloadEnabled = false
+local AR2_autoReloadLoop = nil
+local AR2_autoReloadIsReloading = false
+
+local function AR2_doAutoReload()
+    if AR2_autoReloadIsReloading then return end
+    AR2_autoReloadIsReloading = true
+    local VI = game:GetService("VirtualInputManager")
+    VI:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+    task.wait(0.05)
+    VI:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+    task.wait(2.5)
+    AR2_autoReloadIsReloading = false
+end
+
+local function AR2_checkAmmoForAutoReload()
+    if not AR2_autoReloadEnabled then return end
+    local pc = AR2_getPlayerClass()
+    if not pc or not pc.Character then return end
+    local equipped = pc.Character.EquippedItem
+    if not equipped or not equipped.__item then return end
+    local ammo = equipped.__item.Attachments.Ammo
+    if not ammo then return end
+    local currentAmmo = ammo.__item.WorkingAmount
+    if currentAmmo == 0 and not AR2_autoReloadIsReloading then
+        AR2_doAutoReload()
+    end
+end
+
+function AR2_setAutoReload(enabled)
+    AR2_CFG.weapon.autoReload = enabled
+    AR2_autoReloadEnabled = enabled
+    if enabled and not AR2_autoReloadLoop then
+        AR2_autoReloadLoop = AR2_RunService.Heartbeat:Connect(function()
+            pcall(AR2_checkAmmoForAutoReload)
+        end)
+    elseif not enabled and AR2_autoReloadLoop then
+        AR2_autoReloadLoop:Disconnect()
+        AR2_autoReloadLoop = nil
+        AR2_autoReloadIsReloading = false
+    end
+end
+
+-- Remove Shadows
+function AR2_setRemoveShadows(enabled)
+    AR2_CFG.misc.removeShadows = enabled
+    AR2_Lighting.GlobalShadows = not enabled
+end
+
+-- Clouds
+local AR2_cloudsObject = nil
+local function AR2_findClouds()
+    if AR2_cloudsObject and AR2_cloudsObject.Parent then return AR2_cloudsObject end
+    AR2_cloudsObject = AR2_Workspace:FindFirstChildOfClass("Clouds") or (AR2_Workspace.Terrain and AR2_Workspace.Terrain:FindFirstChildOfClass("Clouds"))
+    return AR2_cloudsObject
+end
+local AR2_cloudsOriginal = nil
+
+function AR2_setClouds(enabled, modify, color, cover, density)
+    AR2_CFG.visuals.cloudsEnabled = enabled
+    AR2_CFG.visuals.modifyClouds = modify
+    if color then AR2_CFG.visuals.cloudsColor = color end
+    if cover then AR2_CFG.visuals.cloudsCover = cover end
+    if density then AR2_CFG.visuals.cloudsDensity = density end
+
+    local clouds = AR2_findClouds()
+    if not clouds then return end
+
+    if not AR2_cloudsOriginal then
+        AR2_cloudsOriginal = {
+            Enabled = clouds.Enabled,
+            Color = clouds.Color,
+            Cover = clouds.Cover,
+            Density = clouds.Density,
+        }
+    end
+
+    if enabled then
+        if modify then
+            clouds.Enabled = true
+            clouds.Color = AR2_CFG.visuals.cloudsColor
+            clouds.Cover = AR2_CFG.visuals.cloudsCover
+            clouds.Density = AR2_CFG.visuals.cloudsDensity
+        else
+            clouds.Enabled = true
+            clouds.Color = AR2_cloudsOriginal.Color
+            clouds.Cover = AR2_cloudsOriginal.Cover
+            clouds.Density = AR2_cloudsOriginal.Density
+        end
+    else
+        clouds.Enabled = false
+    end
+end
+
+-- Color Correction
+local AR2_colorCorrection = nil
+function AR2_setColorCorrection(enabled, saturation, contrast, brightness)
+    AR2_CFG.visuals.colorCorrectionEnabled = enabled
+    if saturation then AR2_CFG.visuals.ccSaturation = saturation end
+    if contrast then AR2_CFG.visuals.ccContrast = contrast end
+    if brightness then AR2_CFG.visuals.ccBrightness = brightness end
+
+    if enabled then
+        if not AR2_colorCorrection or not AR2_colorCorrection.Parent then
+            AR2_colorCorrection = AR2_Lighting:FindFirstChildOfClass("ColorCorrectionEffect") or Instance.new("ColorCorrectionEffect")
+            AR2_colorCorrection.Parent = AR2_Lighting
+        end
+        AR2_colorCorrection.Saturation = AR2_CFG.visuals.ccSaturation
+        AR2_colorCorrection.Contrast = AR2_CFG.visuals.ccContrast * 2
+        AR2_colorCorrection.Brightness = AR2_CFG.visuals.ccBrightness - 1
+        AR2_colorCorrection.Enabled = true
+    else
+        if AR2_colorCorrection then
+            AR2_colorCorrection.Enabled = false
+        end
+    end
+end
+
+-- Self Backtrack
+local AR2_backtrackHistory = {}
+local AR2_backtrackEnabled = false
+local AR2_backtrackColor = AR2_CFG.misc.selfBacktrack.color
+local AR2_backtrackTransparency = AR2_CFG.misc.selfBacktrack.transparency
+local AR2_backtrackMaterial = AR2_CFG.misc.selfBacktrack.material
+local AR2_backtrackDelay = AR2_CFG.misc.selfBacktrack.delay
+local AR2_backtrackFakeModel = nil
+local R15_PARTS = {
+    "Head", "UpperTorso", "LowerTorso",
+    "LeftUpperArm", "LeftLowerArm", "LeftHand",
+    "RightUpperArm", "RightLowerArm", "RightHand",
+    "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+    "RightUpperLeg", "RightLowerLeg", "RightFoot"
+}
+
+local function AR2_createFakeModel(character, cframe)
+    if AR2_backtrackFakeModel then AR2_backtrackFakeModel:Destroy() end
+    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then return end
+    AR2_backtrackFakeModel = Instance.new("Model")
+    AR2_backtrackFakeModel.Name = "BT_Self"
+    for _, partName in ipairs(R15_PARTS) do
+        local realPart = character:FindFirstChild(partName)
+        if realPart and realPart:IsA("BasePart") then
+            local fakePart = realPart:Clone()
+            fakePart.Anchored = true
+            fakePart.CanCollide = false
+            fakePart.CanQuery = false
+            fakePart.CanTouch = false
+            fakePart.CastShadow = false
+            fakePart.Massless = true
+            fakePart.Transparency = AR2_backtrackTransparency
+            fakePart.Color = AR2_backtrackColor
+            fakePart.Material = AR2_backtrackMaterial
+            fakePart.Name = partName
+            for _, child in ipairs(fakePart:GetChildren()) do
+                if not child:IsA("SpecialMesh") and not child:IsA("DataModelMesh") then
+                    child:Destroy()
+                end
+            end
+            local offset = humanoidRootPart.CFrame:ToObjectSpace(realPart.CFrame)
+            fakePart.CFrame = cframe * offset
+            fakePart.Parent = AR2_backtrackFakeModel
+        end
+    end
+    AR2_backtrackFakeModel.Parent = AR2_Workspace
+end
+
+local function AR2_backtrackLoop()
+    if not AR2_backtrackEnabled then
+        if AR2_backtrackFakeModel then AR2_backtrackFakeModel:Destroy() AR2_backtrackFakeModel = nil end
+        AR2_backtrackHistory = {}
+        return
+    end
+    local character = AR2_LocalPlayer.Character
+    local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then return end
+    local now = tick()
+    table.insert(AR2_backtrackHistory, { time = now, cframe = humanoidRootPart.CFrame })
+    while #AR2_backtrackHistory > 200 do table.remove(AR2_backtrackHistory, 1) end
+    local targetTime = now - AR2_backtrackDelay
+    local bestRecord = nil
+    local bestDiff = math.huge
+    for _, record in ipairs(AR2_backtrackHistory) do
+        local diff = math.abs(record.time - targetTime)
+        if diff < bestDiff then bestDiff = diff bestRecord = record end
+    end
+    if bestRecord then AR2_createFakeModel(character, bestRecord.cframe) end
+end
+
+function AR2_setSelfBacktrack(enabled)
+    AR2_backtrackEnabled = enabled
+    AR2_CFG.misc.selfBacktrack.enabled = enabled
+    if not enabled and AR2_backtrackFakeModel then
+        AR2_backtrackFakeModel:Destroy()
+        AR2_backtrackFakeModel = nil
+        AR2_backtrackHistory = {}
+    end
+end
+
+AR2_RunService.Heartbeat:Connect(AR2_backtrackLoop)
+
+-- Jump Circle
+local AR2_jumpCircleEnabled = false
+local AR2_jumpCircleColor = AR2_CFG.misc.jumpCircle.color
+local AR2_jumpCircleStartRadius = AR2_CFG.misc.jumpCircle.startRadius
+local AR2_jumpCircleEndRadius = AR2_CFG.misc.jumpCircle.endRadius
+local AR2_jumpCircleDuration = AR2_CFG.misc.jumpCircle.duration
+
+local function AR2_spawnJumpCircle(position)
+    local part = Instance.new("Part")
+    part.Name = "JumpCircleEffect"
+    part.Shape = Enum.PartType.Cylinder
+    part.Material = Enum.Material.Neon
+    part.Transparency = 0.5
+    part.Color = AR2_jumpCircleColor
+    part.Size = Vector3.new(AR2_jumpCircleStartRadius*2, 0.05, AR2_jumpCircleStartRadius*2)
+    part.Anchored = true
+    part.CanCollide = false
+    part.CastShadow = false
+    local raycastParams = RaycastParams.new()
+    if AR2_LocalPlayer.Character then raycastParams.FilterDescendantsInstances = {AR2_LocalPlayer.Character} end
+    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+    local rayResult = AR2_Workspace:Raycast(position, Vector3.new(0, -15, 0), raycastParams)
+    if rayResult then part.Position = rayResult.Position + Vector3.new(0, 0.1, 0)
+    else part.Position = position - Vector3.new(0, 3, 0) end
+    part.Parent = AR2_Workspace
+    local expandTween = game:GetService("TweenService"):Create(part, TweenInfo.new(AR2_jumpCircleDuration, Enum.EasingStyle.Circular, Enum.EasingDirection.Out), { Size = Vector3.new(AR2_jumpCircleEndRadius*2, 0.05, AR2_jumpCircleEndRadius*2) })
+    local fadeTween = game:GetService("TweenService"):Create(part, TweenInfo.new(AR2_jumpCircleDuration * 0.8, Enum.EasingStyle.Quart, Enum.EasingDirection.In), { Transparency = 1 })
+    expandTween:Play()
+    fadeTween:Play()
+    expandTween.Completed:Once(function() part:Destroy() end)
+end
+
+local function AR2_jumpCircleOnJump()
+    if not AR2_jumpCircleEnabled then return end
+    local char = AR2_LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root then AR2_spawnJumpCircle(root.Position) end
+end
+
+AR2_LocalPlayer.CharacterAdded:Connect(function(char)
+    local humanoid = char:WaitForChild("Humanoid")
+    humanoid.StateChanged:Connect(function(_, state)
+        if state == Enum.HumanoidStateType.Jumping then AR2_jumpCircleOnJump() end
+    end)
+end)
+
+function AR2_setJumpCircle(enabled)
+    AR2_jumpCircleEnabled = enabled
+    AR2_CFG.misc.jumpCircle.enabled = enabled
+end
+
+-- Instant Interact
+local AR2_instantInteractEnabled = false
+local AR2_instantInteractHookInstalled = false
+local AR2_instantInteractOriginal = nil
+
+local function AR2_installInstantInteractHook()
+    if AR2_instantInteractHookInstalled then return end
+    local Framework = require(AR2_ReplicatedStorage:WaitForChild("Framework"))
+    Framework:WaitForLoaded()
+    local Interactables = Framework.Classes.Interactables
+    local original = Interactables.GetInteractPromptData
+    if not original then return end
+    AR2_instantInteractOriginal = original
+    Interactables.GetInteractPromptData = function(...)
+        local data = AR2_instantInteractOriginal(...)
+        if AR2_instantInteractEnabled and data and data.Actions and data.Actions[1] then
+            data.Actions[1].Time = 0
+        end
+        return data
+    end
+    AR2_instantInteractHookInstalled = true
+end
+
+function AR2_setInstantInteract(enabled)
+    AR2_instantInteractEnabled = enabled
+    AR2_CFG.misc.instantInteract = enabled
+    if enabled then
+        -- try to install immediately; also re-check every 1s in case Framework wasn't ready
+        pcall(AR2_installInstantInteractHook)
+        if not AR2_instantInteractHookInstalled then
+            task.spawn(function()
+                while not AR2_instantInteractHookInstalled and AR2_instantInteractEnabled do
+                    task.wait(1)
+                    pcall(AR2_installInstantInteractHook)
+                end
+            end)
+        end
+    end
+end
+
+-- Container Persistence
+local AR2_containerPersistenceEnabled = false
+local AR2_containerPersistenceHooked = false
+local function AR2_hookContainerPersistence()
+    if AR2_containerPersistenceHooked then return end
+    AR2_containerPersistenceHooked = true
+    local Framework = require(AR2_ReplicatedStorage:WaitForChild("Framework"))
+    Framework:WaitForLoaded()
+    local Network = Framework.Libraries.Network
+    local originalSend = Network.Send
+    local function newSend(self, eventName, ...)
+        if eventName == "Inventory Closed" and AR2_containerPersistenceEnabled then
+            return
+        end
+        return originalSend(self, eventName, ...)
+    end
+    Network.Send = newSend
+end
+function AR2_setContainerPersistence(enabled)
+    AR2_containerPersistenceEnabled = enabled
+    AR2_CFG.misc.containerPersistence = enabled
+    if enabled then AR2_hookContainerPersistence() end
+end
+
+-- Player Jesus
+local AR2_playerJesusEnabled = false
+local function AR2_applyPlayerJesus(enabled)
+    local water = AR2_Workspace:FindFirstChild("Map") and AR2_Workspace.Map:FindFirstChild("Water") or AR2_Workspace:FindFirstChild("Water")
+    if not water then return end
+    for _, part in ipairs(water:GetDescendants()) do
+        if enabled then
+            if part:HasTag("Swim Surface") then
+                part:RemoveTag("Swim Surface")
+                part:AddTag("Player Jesus")
+            end
+        else
+            if part:HasTag("Player Jesus") then
+                part:RemoveTag("Player Jesus")
+                part:AddTag("Swim Surface")
+            end
+        end
+    end
+end
+function AR2_setPlayerJesus(enabled)
+    AR2_playerJesusEnabled = enabled
+    AR2_CFG.misc.playerJesus = enabled
+    AR2_applyPlayerJesus(enabled)
+end
+
 -- Final initialization
 AR2_tracersEnabled = AR2_CFG.misc.tracers
 AR2_esp.update()
@@ -5026,7 +5470,8 @@ if AR2_CFG.minimap.on then AR2_minimapEnabled = true AR2_updateMinimap() end
 if AR2_CFG.misc.noclip then AR2_startNoclip() end
 if AR2_CFG.misc.infJump then AR2_startInfJump() end
 AR2_toggleRemoveTextures(AR2_CFG.misc.removeTextures)
-AR2_toggleRemoveTrees(AR2_CFG.misc.removeTrees)
+AR2_toggleRemoveLeaves(AR2_CFG.misc.removeLeaves)
+AR2_toggleRemoveBushes(AR2_CFG.misc.removeBushes)
 if AR2_CFG.misc.hidePlayer then AR2_toggleHidePlayer(true) end
 if AR2_CFG.misc.hideGun then AR2_toggleHideGun(true) end
 if AR2_CFG.weapon.wallbang then startWallbangTagging() else stopWallbangTagging() end
@@ -5040,6 +5485,15 @@ AR2_toggleCrosshair(AR2_CFG.crosshair.enabled)
 if AR2_CFG.tp.respawnTP then AR2_toggleRespawnTP(true) end
 if AR2_CFG.weapon.hbeOn then AR2_hbeSetEnabled(true) end
 if AR2_CFG.misc.cosUnlock then AR2_cosSetEnabled(true) end
+AR2_setAutoReload(AR2_CFG.weapon.autoReload)
+AR2_setInstantInteract(AR2_CFG.misc.instantInteract)
+AR2_setContainerPersistence(AR2_CFG.misc.containerPersistence)
+AR2_setPlayerJesus(AR2_CFG.misc.playerJesus)
+AR2_setSelfBacktrack(AR2_CFG.misc.selfBacktrack.enabled)
+AR2_setJumpCircle(AR2_CFG.misc.jumpCircle.enabled)
+AR2_setRemoveShadows(AR2_CFG.misc.removeShadows)
+AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, AR2_CFG.visuals.cloudsDensity)
+AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, AR2_CFG.visuals.ccSaturation, AR2_CFG.visuals.ccContrast, AR2_CFG.visuals.ccBrightness)
 
 AR2_registerAllKeybinds()
 
@@ -5060,7 +5514,8 @@ function AR2_unload()
     AR2_stopNoclip()
     AR2_stopInfJump()
     AR2_toggleRemoveTextures(false)
-    AR2_toggleRemoveTrees(false)
+    AR2_toggleRemoveLeaves(false)
+    AR2_toggleRemoveBushes(false)
     AR2_toggleHidePlayer(false)
     AR2_toggleHideGun(false)
     stopWallbangTagging()
@@ -5074,6 +5529,15 @@ function AR2_unload()
     AR2_toggleRespawnTP(false)
     AR2_hbeSetEnabled(false)
     AR2_cosSetEnabled(false)
+    AR2_setAutoReload(false)
+    AR2_setInstantInteract(false)
+    AR2_setContainerPersistence(false)
+    AR2_setPlayerJesus(false)
+    AR2_setSelfBacktrack(false)
+    AR2_setJumpCircle(false)
+    AR2_setRemoveShadows(false)
+    AR2_setClouds(false, false, nil, nil, nil)
+    AR2_setColorCorrection(false)
     if AR2_mapConn then AR2_mapConn:Disconnect() end
     if AR2_mapGui then AR2_mapGui:Destroy() end
     if AR2_minimapGui then AR2_minimapGui:Destroy() end
