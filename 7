@@ -78,7 +78,7 @@ AR2_CFG = {
         bulletSpeed = 0, killSpread = true, originShift = true, redirectChance = 100,
     },
     magicBullet = { searchRadius = 10, forwardNudge = 1 },
-    rageBot = { on = false, maxDist = 1200, players = true, zombies = false, requireADS = true, protection = false, protectionRadius = 50 },
+    rageBot = { on = false, maxDist = 1200, players = true, zombies = false, requireADS = false, protection = false, protectionRadius = 50, noTeammate = true, ignoreFov = true },
     weapon = {
         noRecoil = false, noSpread = false, wallbang = false, allFireModes = false,
         instantReload = false, recoilReduction = 0, noBulletDrop = false,
@@ -148,6 +148,12 @@ AR2_CFG = {
         wallbang = "None", protection = "None", crosshair = "None", tracers = "None",
     },
 }
+
+-- Initialize rage bot globals and reload watch timer
+AR2_rageBotConn   = nil
+AR2_rageBotHeld   = false
+AR2_rageBotTarget = nil
+AR2_reloadWatchLast = 0
 
 AR2_COLORS = {
     player = Color3.fromRGB(255, 80, 90), armed = Color3.fromRGB(255, 140, 40),
@@ -239,7 +245,7 @@ function AR2_loadConfigByName(name)
         AR2_carMods.apply()
         if AR2_CFG.radar.on then AR2_radar.start() else AR2_radar.stop() end
         if AR2_CFG.speed.on then AR2_speed.start() else AR2_speed.stop() end
-        AR2_rageBotSetEnabled(AR2_CFG.rageBot.on)
+        pcall(AR2_rageBotSetEnabled, AR2_CFG.rageBot.on)
         if AR2_CFG.misc.charm then AR2_toggleCharm(true) else AR2_toggleCharm(false) end
         if AR2_CFG.minimap.on then
             AR2_minimapEnabled = true; AR2_updateMinimap()
@@ -315,6 +321,9 @@ function AR2_resetConfig()
     AR2_CFG.weapon.autoReload = false
     AR2_CFG.magicAim.redirectChance = 100
     AR2_CFG.rageBot.on = false
+    AR2_CFG.rageBot.noTeammate = true
+    AR2_CFG.rageBot.ignoreFov = true
+    AR2_CFG.rageBot.requireADS = false
     AR2_CFG.misc.freeze = false
     AR2_CFG.misc.infJump = false
     AR2_CFG.misc.noclip = false
@@ -364,7 +373,7 @@ function AR2_resetConfig()
         AR2_carMods.apply()
         AR2_radar.stop()
         AR2_speed.stop()
-        AR2_rageBotSetEnabled(false)
+        pcall(AR2_rageBotSetEnabled, false)
         AR2_toggleCharm(false)
         AR2_toggleFOVZoom(false)
         AR2_toggleDistZoomEnabled(false)
@@ -1591,7 +1600,6 @@ function stopWallbangTagging()
     end
     AR2_wallbangSaved = {}
 end
-
 -- =============================================
 -- HITMARKER SYSTEM
 -- GUI built here in main thread.
@@ -1794,6 +1802,28 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                 end
             end
 
+            -- Rage bot: overrides magic aim direction when active
+            if AR2_CFG.rageBot.on and AR2_rageBotTarget then
+                local t = AR2_rageBotTarget
+                if t.model and t.model.Parent then
+                    local rp = RaycastParams.new()
+                    rp.FilterType = Enum.RaycastFilterType.Exclude
+                    rp.FilterDescendantsInstances = { AR2_LocalPlayer.Character, t.model }
+                    local bones = {"HeadCollider","Head","UpperTorso","LowerTorso","HumanoidRootPart"}
+                    local aim = t.headCollider or t.head or t.torso or t.root
+                    for _, bn in ipairs(bones) do
+                        local bp = t.model:FindFirstChild(bn)
+                        if bp and bp:IsA("BasePart") then
+                            if not workspace:Raycast(origin, bp.Position-origin, rp) then
+                                aim = bp break
+                            end
+                        end
+                    end
+                    if aim then direction = (aim.Position - origin).Unit end
+                end
+            end
+
+                        -- Safe recoil/spread handling
             if AR2_CFG.weapon.recoilReduction and AR2_CFG.weapon.recoilReduction > 0 then
                 local reduction = AR2_CFG.weapon.recoilReduction / 100
                 if AR2_recoilOriginalFn then
@@ -1805,12 +1835,32 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                             return Vector2.new(x.X * (1 - reduction), x.Y * (1 - reduction)), z * (1 - reduction), a * (1 - reduction), b * (1 - reduction), 0
                         end
                     end
-                    debug.setupvalue(AR2_originalFireFunction, 6, newRecoil)
+                    local ok, err = pcall(debug.setupvalue, AR2_originalFireFunction, 6, newRecoil)
+                    if not ok then
+                        -- Upvalue index invalid; disable recoil reduction to avoid errors
+                        AR2_CFG.weapon.recoilReduction = 0
+                    end
+                else
+                    -- No recoil upvalue found, disable feature
+                    AR2_CFG.weapon.recoilReduction = 0
                 end
             else
                 if AR2_recoilOriginalFn then
-                    debug.setupvalue(AR2_originalFireFunction, 6, AR2_recoilOriginalFn)
+                    pcall(debug.setupvalue, AR2_originalFireFunction, 6, AR2_recoilOriginalFn)
                 end
+            end
+
+            if AR2_CFG.weapon.noSpread then
+                if AR2_spreadOriginal then
+                    local ok, err = pcall(debug.setupvalue, AR2_originalFireFunction, 3, function(rng, dir) return dir.Unit end)
+                    if not ok then
+                        AR2_CFG.weapon.noSpread = false
+                    end
+                else
+                    AR2_CFG.weapon.noSpread = false
+                end
+            elseif AR2_spreadOriginal then
+                pcall(debug.setupvalue, AR2_originalFireFunction, 3, AR2_spreadOriginal)
             end
 
             if AR2_CFG.weapon.noSpread then
@@ -4566,20 +4616,15 @@ if WindUI then
     addSlider(silentAimSection, "Forward Nudge", AR2_CFG.magicBullet, "forwardNudge", 0, 5)
     addSlider(silentAimSection, "Redirect Chance %", AR2_CFG.magicAim, "redirectChance", 0, 100)
 
-    -- Rage Bot section
+        -- Rage Bot section (corrected, no label)
     local rageBotSection = combatTab:Section({ Title = "Rage Bot", Box = false })
     addToggle(rageBotSection, "Enabled", AR2_CFG.rageBot, "on", function(v) AR2_rageBotSetEnabled(v) end)
     addToggle(rageBotSection, "Target Players", AR2_CFG.rageBot, "players")
     addToggle(rageBotSection, "Target Zombies", AR2_CFG.rageBot, "zombies")
-    addSlider(rageBotSection, "Max Distance", AR2_CFG.rageBot, "maxDist", 100, 3000)
-    addToggle(rageBotSection, "Require ADS (Right Click)", AR2_CFG.rageBot, "requireADS", function(v) AR2_CFG.rageBot.requireADS = v end)
-    addToggle(rageBotSection, "Protection Mode (360°)", AR2_CFG.rageBot, "protection", function(v)
-        AR2_CFG.rageBot.protection = v
-        AR2_CFG.magicAim.ignoreFov = v
-        AR2_magicUpdate()
+    addSlider(rageBotSection, "Max Distance", AR2_CFG.rageBot, "maxDist", 100, 2000, function(v) AR2_CFG.rageBot.maxDist = v end)
+    addToggle(rageBotSection, "Skip Teammates", AR2_CFG.rageBot, "noTeammate", function(v)
+        AR2_CFG.rageBot.noTeammate = v
     end)
-    addSlider(rageBotSection, "Protection Radius", AR2_CFG.rageBot, "protectionRadius", 10, 200)
-
     local weaponModsSection = combatTab:Section({ Title = "Weapon Mods", Box = false })
     addToggle(weaponModsSection, "No Spread", AR2_CFG.weapon, "noSpread")
     addToggle(weaponModsSection, "Wallbang", AR2_CFG.weapon, "wallbang", function(v) if v then startWallbangTagging() else stopWallbangTagging() end end)
@@ -5461,7 +5506,7 @@ AR2_visuals.apply()
 AR2_carMods.apply()
 if AR2_CFG.radar.on then AR2_radar.start() end
 if AR2_CFG.speed.on then AR2_speed.start() end
-AR2_rageBotSetEnabled(AR2_CFG.rageBot.on)
+pcall(AR2_rageBotSetEnabled, AR2_CFG.rageBot.on)
 AR2_toggleFOVZoom(AR2_CFG.misc.fovZoom)
 AR2_toggleDistZoomEnabled(AR2_CFG.misc.distZoomEnabled)
 AR2_toggleDistanceZoom(AR2_CFG.misc.distZoomActive)
@@ -5507,7 +5552,7 @@ function AR2_unload()
     AR2_carMods.destroy()
     AR2_radar.destroy()
     AR2_speed.stop()
-    AR2_rageBotSetEnabled(false)
+    pcall(AR2_rageBotSetEnabled, false)
     AR2_toggleFOVZoom(false)
     AR2_toggleDistZoomEnabled(false)
     AR2_toggleDistanceZoom(false)
