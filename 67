@@ -1,619 +1,2833 @@
-We'll extract the core logic for each requested feature from the provided script. The code assumes you have the same environment (Roblox with the game's "Framework" in `ReplicatedFirst`, and services like `Players`, `RunService`, `Lighting`, etc.). We'll present each feature as a self-contained snippet that you can integrate into your own script or UI.
 
-**Important notes:**
-- Some features require the game's Framework (e.g., `require(rf:WaitForChild("Framework"))`). They are only applicable to this specific game (AR2).
-- The UI library (`NL`) is not included; you'll need to create your own toggles/sliders or adapt the code to your UI system.
-- Global variables from the original script that are used by these features will be defined locally in each snippet where possible.
-
----
-
-## 1. Auto Reload
-
-This feature automatically presses `R` when the magazine is empty, and also includes an "Instant Reload" that skips the reload animation.  
-Requires the game's Framework and `VirtualInputManager`.
-
-```lua
--- Services
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local ReplicatedFirst = game:GetService("ReplicatedFirst")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-
--- Framework
-local Framework = require(ReplicatedFirst:WaitForChild("Framework"))
-Framework:WaitForLoaded()
-local PlayerController = Framework.Classes.Players.get()
-
--- Auto reload state
-local autoReloadEnabled = false
-local isReloading = false
-
-local function doReload()
-    if isReloading then return end
-    isReloading = true
-    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
-    task.wait(0.05)
-    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
-    task.wait(2.5)
-    isReloading = false
-end
-
-local function checkAmmo()
-    if not autoReloadEnabled then return end
-    local character = PlayerController.Character
-    if not character then return end
-    local equipped = character.EquippedItem
-    if not equipped or not equipped.__item then return end
-    local ammo = equipped.__item.Attachments.Ammo
-    if not ammo then return end
-    local currentAmmo = ammo.__item.WorkingAmount
-    if currentAmmo == 0 and not isReloading then
-        doReload()
-    end
-end
-
--- Loop
-task.spawn(function()
-    while true do
-        task.wait(0.15)
-        pcall(checkAmmo)
-    end
-end)
-
--- Enable/disable: set autoReloadEnabled = true/false
-```
-
-**Instant Reload** (skip reload animation) – hooks the firearm initializer:
-
-```lua
--- This part requires the specific framework and firearm initializer.
-local instantReloadEnabled = false
-
-task.spawn(function()
-    pcall(function()
-        local Framework = require(ReplicatedFirst:WaitForChild("Framework"))
-        Framework:WaitForLoaded()
-        local FirearmInitializer = require(game:GetService("ReplicatedStorage").Client.Abstracts.ItemInitializers.Firearm)
-        local originalAttemptReload = debug.getupvalue(FirearmInitializer, 7)  -- may need adjustment
-        if type(originalAttemptReload) == "function" then
-            debug.setupvalue(FirearmInitializer, 7, function(...)
-                if instantReloadEnabled then
-                    local args = {...}
-                    if #args >= 4 then
-                        local callback = args[4]
-                        if type(callback) == "function" then
-                            pcall(function()
-                                callback("Commit", "Load")
-                                callback("Commit", "End")
-                            end)
-                        end
+local AR2_removedTrees = {}
+function AR2_toggleRemoveTrees(enabled)
+    AR2_CFG.misc.removeTrees = enabled
+    local tags = {"tree","bush","foliage","plant","shrub"}
+    if enabled then
+        for _, obj in ipairs(AR2_Workspace:GetDescendants()) do
+            if obj:IsA("BasePart") or obj:IsA("MeshPart") then
+                local n = obj.Name:lower()
+                for _, tag in ipairs(tags) do
+                    if string.find(n, tag, 1, true) then
+                        AR2_removedTrees[obj] = obj.LocalTransparencyModifier
+                        obj.LocalTransparencyModifier = 1
+                        break
                     end
-                    return true
                 end
-                return originalAttemptReload(...)
-            end)
+            end
         end
-    end)
-end)
-```
+    else
+        for obj, t in pairs(AR2_removedTrees) do
+            if obj and obj.Parent then obj.LocalTransparencyModifier = t end
+        end
+        AR2_removedTrees = {}
+    end
+end
 
----
+-- Remove leaves & bushes
+local AR2_leaveConn = nil
+local AR2_leaveSaved = {}
 
-## 2. Remove Shadows
+local function AR2_applyLeafTransparency(part)
+    if not AR2_leaveSaved[part] then AR2_leaveSaved[part] = part.Transparency end
+    part.Transparency = 1
+end
 
-Simply toggles `Lighting.GlobalShadows`.
-
-```lua
-local Lighting = game:GetService("Lighting")
-local noShadows = false  -- set to true to remove shadows
-
-Lighting.GlobalShadows = not noShadows
-```
-
----
-
-## 3. Remove Leaves
-
-Makes foliage parts (leaves, fronds, pine leaves) transparent. Handles parts added later.
-
-```lua
-local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
-
-local removeLeaves = false
-local originalTransparencies = {}
-local descendantConnection = nil
-
-local function setLeavesTransparency(enabled)
-    local mapElements = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("Elements")
+local function AR2_scanLeaves()
+    local mapElements = AR2_Workspace:FindFirstChild("Map") and AR2_Workspace.Map:FindFirstChild("Elements")
     if not mapElements then return end
-
-    local function processPart(part)
-        if part.Name == "Fronds" or part.Name == "Leaves" or part.Name == "PineLeaves" then
-            if enabled then
-                if not originalTransparencies[part] then
-                    originalTransparencies[part] = part.Transparency
-                end
-                part.Transparency = 1
-            else
-                local original = originalTransparencies[part]
-                if original ~= nil then
-                    part.Transparency = original
-                else
-                    part.Transparency = 0
-                end
-            end
-        end
-    end
-
-    -- Apply to existing parts
     for _, part in ipairs(mapElements:GetDescendants()) do
-        processPart(part)
-    end
-
-    -- Connect to new parts
-    if enabled and not descendantConnection then
-        descendantConnection = mapElements.DescendantAdded:Connect(function(part)
-            task.wait()
-            processPart(part)
-        end)
-    elseif not enabled and descendantConnection then
-        descendantConnection:Disconnect()
-        descendantConnection = nil
-        originalTransparencies = {}
-    end
-end
-
--- Toggle: setLeavesTransparency(true) to remove, setLeavesTransparency(false) to restore
-```
-
----
-
-## 4. Custom Sky
-
-Replaces the skybox with a preset from a table.
-
-```lua
-local Lighting = game:GetService("Lighting")
-
-local skyboxes = {
-    Galaxy = {
-        Bk = "http://www.roblox.com/asset/?id=149397692", Dn = "http://www.roblox.com/asset/?id=149397686",
-        Ft = "http://www.roblox.com/asset/?id=149397697", Lf = "http://www.roblox.com/asset/?id=149397684",
-        Rt = "http://www.roblox.com/asset/?id=149397688", Up = "http://www.roblox.com/asset/?id=149397702"
-    },
-    ["Galaxy 2"] = {
-        Bk = "http://www.roblox.com/asset/?id=155441936", Dn = "http://www.roblox.com/asset/?id=155441802",
-        Ft = "http://www.roblox.com/asset/?id=155441818", Lf = "http://www.roblox.com/asset/?id=155441777",
-        Rt = "http://www.roblox.com/asset/?id=155441874", Up = "http://www.roblox.com/asset/?id=155441905"
-    },
-    -- Add more from the original script as needed
-}
-
-local currentSkyName = "Galaxy"   -- default
-
-local function clearSky()
-    for _, child in pairs(Lighting:GetChildren()) do
-        if child:IsA("Sky") then
-            child:Destroy()
+        if part.Name == "Fronds" or part.Name == "Leaves" or part.Name == "PineLeaves" then
+            AR2_applyLeafTransparency(part)
         end
     end
 end
 
-local function setSky(skyName)
-    local data = skyboxes[skyName]
-    if not data then return end
-    clearSky()
-    local sky = Instance.new("Sky")
-    sky.SkyboxBk = data.Bk
-    sky.SkyboxDn = data.Dn
-    sky.SkyboxFt = data.Ft
-    sky.SkyboxLf = data.Lf
-    sky.SkyboxRt = data.Rt
-    sky.SkyboxUp = data.Up
-    sky.Parent = Lighting
-end
-
--- Usage:
--- setSky("Galaxy")      -- apply custom sky
--- clearSky()            -- restore default (remove custom sky)
-```
-
----
-
-## 5. Clouds
-
-Modifies the `Clouds` object (if present in workspace). Allows toggling clouds and changing color, cover, density.
-
-```lua
-local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
-
-local clouds = Workspace:FindFirstChildOfClass("Clouds") or (Workspace.Terrain and Workspace.Terrain:FindFirstChildOfClass("Clouds"))
-if not clouds then
-    warn("Clouds object not found")
-    return
-end
-
--- Defaults from game (adjust as needed)
-local defaultEnabled = clouds.Enabled
-local defaultColor = clouds.Color
-local defaultCover = clouds.Cover
-local defaultDensity = clouds.Density
-
--- User settings
-local modifyClouds = false
-local cloudsEnabled = true
-local cloudsColor = defaultColor
-local cloudsCover = 0.5
-local cloudsDensity = 0.5
-
--- Apply continuously
-RunService.RenderStepped:Connect(function()
-    if modifyClouds then
-        clouds.Enabled = cloudsEnabled
-        clouds.Color = cloudsColor
-        clouds.Cover = cloudsCover
-        clouds.Density = cloudsDensity
+function AR2_toggleRemoveLeaves(enabled)
+    AR2_CFG.misc.removeLeaves = enabled
+    if enabled then
+        AR2_scanLeaves()
+        if not AR2_leaveConn then
+            local mapElements = AR2_Workspace:FindFirstChild("Map") and AR2_Workspace.Map:FindFirstChild("Elements")
+            if mapElements then
+                AR2_leaveConn = mapElements.DescendantAdded:Connect(function(part)
+                    if part.Name == "Fronds" or part.Name == "Leaves" or part.Name == "PineLeaves" then
+                        task.wait()
+                        AR2_applyLeafTransparency(part)
+                    end
+                end)
+            end
+        end
     else
-        -- Restore defaults when not modifying
-        clouds.Enabled = defaultEnabled
-        clouds.Color = defaultColor
-        clouds.Cover = defaultCover
-        clouds.Density = defaultDensity
-    end
-end)
-
--- Set modifyClouds = true to start applying your values.
-```
-
----
-
-## 6. Color Correction
-
-Applies a `ColorCorrectionEffect` to Lighting with adjustable saturation, contrast, brightness.
-
-```lua
-local Lighting = game:GetService("Lighting")
-local RunService = game:GetService("RunService")
-
-local colorCorrectionEnabled = false
-local saturation = 1
-local contrast = 0.5   -- will be doubled
-local brightness = 1   -- will be reduced by 1
-
-local colorCorrection = nil
-
-local function updateColorCorrection()
-    if colorCorrectionEnabled then
-        if not colorCorrection or not colorCorrection.Parent then
-            colorCorrection = Lighting:FindFirstChildOfClass("ColorCorrectionEffect") or Instance.new("ColorCorrectionEffect")
-            colorCorrection.Parent = Lighting
+        if AR2_leaveConn then
+            AR2_leaveConn:Disconnect()
+            AR2_leaveConn = nil
         end
-        colorCorrection.Saturation = saturation
-        colorCorrection.Contrast = contrast * 2   -- original mapped 0..1 -> 0..2
-        colorCorrection.Brightness = brightness - 1 -- original mapped 0.2..2 -> -0.8..1
-        colorCorrection.Enabled = true
-    else
-        if colorCorrection then
-            colorCorrection.Enabled = false
+        for part, orig in pairs(AR2_leaveSaved) do
+            if part.Parent then part.Transparency = orig end
         end
+        AR2_leaveSaved = {}
     end
 end
 
--- Call updateColorCorrection() whenever a setting changes or toggle is flipped.
-```
+local AR2_bushRemoved = {}
 
----
+local function AR2_removeBushes()
+    local mapElements = AR2_Workspace:FindFirstChild("Map") and AR2_Workspace.Map:FindFirstChild("Elements")
+    if not mapElements then return end
+    local function scan(parent)
+        for _, child in ipairs(parent:GetChildren()) do
+            if child.Name:find("Foliage") or child.Name:find("Shrub") then
+                AR2_bushRemoved[child] = child.Parent
+                child.Parent = nil
+            else
+                scan(child)
+            end
+        end
+    end
+    scan(mapElements)
+end
 
-## 7. Self Backtrack
+local function AR2_restoreBushes()
+    for child, parent in pairs(AR2_bushRemoved) do
+        if child and parent then child.Parent = parent end
+    end
+    AR2_bushRemoved = {}
+end
 
-Creates a "ghost" of your character at a delayed position, visible only to you.  
-Uses `RunService.Heartbeat` to record CFrame history and creates a model `BT_Self` with cloned body parts.
+function AR2_toggleRemoveBushes(enabled)
+    AR2_CFG.misc.removeBushes = enabled
+    if enabled then
+        AR2_removeBushes()
+    else
+        AR2_restoreBushes()
+    end
+end
+-- =============================================
+-- AR2 Script - Modified Part 3/4
+-- =============================================
 
-```lua
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
+-- =============================================
+-- TELEPORT (full)
+-- =============================================
+AR2_tp = { busy = false, cancel = false, gen = 0, lastResult = "", writes = 0, phase = "idle", attempt = 0, pulls = 0, hops = 0, surfaceTarget = nil, under = false, underGoal = nil, clipSaved = nil, clipAt = 0 }
+AR2_tpGuard = { installed = false, active = false, blocked = 0, why = "", goal = nil }
+AR2_hookmetamethod = hookmetamethod
+AR2_checkcaller = checkcaller
+AR2_getnamecallmethod = getnamecallmethod
+AR2_newcclosure = newcclosure or function(fn) return fn end
+AR2_GUARD_PROPS = { CFrame = true, Position = true, WorldCFrame = true }
+AR2_GUARD_METHODS = { PivotTo = true, SetPrimaryPartCFrame = true, MoveTo = true, ApplyImpulse = true }
 
-local LocalPlayer = Players.LocalPlayer
-
--- Configuration
-local backtrackEnabled = false
-local backtrackColor = Color3.fromRGB(255, 255, 255)
-local backtrackTransparency = 0.4
-local backtrackMaterial = Enum.Material.ForceField
-local backtrackDelay = 0.3   -- seconds
-
--- Internal
-local positionHistory = {}
-local R15_PARTS = {
-    "Head", "UpperTorso", "LowerTorso",
-    "LeftUpperArm", "LeftLowerArm", "LeftHand",
-    "RightUpperArm", "RightLowerArm", "RightHand",
-    "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
-    "RightUpperLeg", "RightLowerLeg", "RightFoot"
-}
-
-local function createFakeModel(character, cframe)
-    -- Remove previous fake
-    local old = Workspace:FindFirstChild("BT_Self")
-    if old then old:Destroy() end
-
-    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
-    if not humanoidRootPart then return end
-
-    local fakeModel = Instance.new("Model")
-    fakeModel.Name = "BT_Self"
-
-    for _, partName in ipairs(R15_PARTS) do
-        local realPart = character:FindFirstChild(partName)
-        if realPart and realPart:IsA("BasePart") then
-            local fakePart = realPart:Clone()
-            fakePart.Anchored = true
-            fakePart.CanCollide = false
-            fakePart.CanQuery = false
-            fakePart.CanTouch = false
-            fakePart.CastShadow = false
-            fakePart.Massless = true
-            fakePart.Transparency = backtrackTransparency
-            fakePart.Color = backtrackColor
-            fakePart.Material = backtrackMaterial
-            fakePart.Name = partName
-
-            -- Remove non-mesh children (decals, etc.)
-            for _, child in ipairs(fakePart:GetChildren()) do
-                if not child:IsA("SpecialMesh") and not child:IsA("DataModelMesh") then
-                    child:Destroy()
+function AR2_tpGuard.install()
+    if AR2_tpGuard.installed then return true end
+    if not (AR2_hookmetamethod and AR2_checkcaller) then AR2_tpGuard.why = "no hookmetamethod/checkcaller" return false, AR2_tpGuard.why end
+    local okIndex = pcall(function()
+        local old
+        old = AR2_hookmetamethod(game, "__newindex", AR2_newcclosure(function(self, key, value)
+            if AR2_tpGuard.active and AR2_GUARD_PROPS[key] and not AR2_checkcaller() then
+                if self == AR2_tpRoot() then
+                    local position = (typeof(value) == "CFrame" and value.Position) or (typeof(value) == "Vector3" and value) or nil
+                    if AR2_tpGuard.goal and position and (position - AR2_tpGuard.goal).Magnitude >= (AR2_CFG.tp.snapBack or 8) then AR2_tpGuard.blocked = AR2_tpGuard.blocked + 1 return end
                 end
             end
-
-            local offset = humanoidRootPart.CFrame:ToObjectSpace(realPart.CFrame)
-            fakePart.CFrame = cframe * offset
-            fakePart.Parent = fakeModel
-        end
-    end
-
-    fakeModel.Parent = Workspace
+            return old(self, key, value)
+        end))
+    end)
+    local okCall = pcall(function()
+        local old
+        old = AR2_hookmetamethod(game, "__namecall", AR2_newcclosure(function(self, ...)
+            if AR2_tpGuard.active and not AR2_checkcaller() then
+                local method = AR2_getnamecallmethod and AR2_getnamecallmethod() or ""
+                if AR2_GUARD_METHODS[method] and (self == AR2_tpRoot() or self == AR2_LocalPlayer.Character) then AR2_tpGuard.blocked = AR2_tpGuard.blocked + 1 return end
+            end
+            return old(self, ...)
+        end))
+    end)
+    if not (okIndex or okCall) then AR2_tpGuard.why = "both hooks failed" return false, AR2_tpGuard.why end
+    AR2_tpGuard.installed = true
+    AR2_tpGuard.why = "armed"
+    return true
 end
 
--- Record history on Heartbeat
-RunService.Heartbeat:Connect(function()
-    if not backtrackEnabled then
-        local old = Workspace:FindFirstChild("BT_Self")
-        if old then old:Destroy() end
-        positionHistory = {}
+function AR2_tpRoot()
+    local char = AR2_LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+function AR2_tpUnseat()
+    if not AR2_CFG.tp.unseat then return end
+    local char = AR2_LocalPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildWhichIsA("Humanoid")
+    if humanoid and humanoid.Sit then humanoid.Sit = false pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end) end
+    for _, part in ipairs(char:GetDescendants()) do if part:IsA("Weld") and part.Name == "SeatWeld" then part:Destroy() end end
+end
+
+function AR2_tpWrite(root, goal)
+    AR2_tpGuard.goal = goal.Position
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    if AR2_CFG.tp.force then
+        root.Anchored = true
+        local char = AR2_LocalPlayer.Character
+        local humanoid = char and char:FindFirstChildWhichIsA("Humanoid")
+        if humanoid then humanoid.PlatformStand = true humanoid.AutoRotate = false end
+    end
+    root.CFrame = goal
+end
+
+function AR2_tpRelease()
+    local root = AR2_tpRoot()
+    if root then root.Anchored = false root.AssemblyLinearVelocity = Vector3.zero end
+    for part in pairs(AR2_tp.clipSaved or {}) do pcall(function() if part.Parent then part.CanCollide = true end end) end
+    AR2_tp.clipSaved = nil
+    local char = AR2_LocalPlayer.Character
+    local humanoid = char and char:FindFirstChildWhichIsA("Humanoid")
+    if humanoid then humanoid.PlatformStand = false humanoid.AutoRotate = true end
+end
+
+function AR2_tpYield()
+    if AR2_CFG.tp.everyFrame then AR2_RunService.Heartbeat:Wait() else task.wait(AR2_CFG.tp.intervalCs/100) end
+end
+
+function AR2_tpAlive(mine) return AR2_tp.gen == mine and not AR2_tp.cancel end
+
+function AR2_tpGroundStand(position)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { AR2_LocalPlayer.Character }
+    params.IgnoreWater = true
+    local hit = AR2_Workspace:Raycast(position + Vector3.new(0,3,0), Vector3.new(0,-12,0), params)
+    if not hit then return position end
+    return Vector3.new(position.X, hit.Position.Y + 3, position.Z)
+end
+
+function AR2_tpGroundBelow(position)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { AR2_LocalPlayer.Character }
+    params.IgnoreWater = true
+    local hit = AR2_Workspace:Raycast(position + Vector3.new(0,2,0), Vector3.new(0,-4000,0), params)
+    if hit then return math.min(hit.Position.Y, position.Y) end
+    return position.Y - 20
+end
+
+function AR2_tpNoclip(on)
+    local char = AR2_LocalPlayer.Character
+    if not char then return end
+    if on then
+        AR2_tp.clipSaved = AR2_tp.clipSaved or {}
+        for _, part in ipairs(char:GetDescendants()) do if part:IsA("BasePart") and part.CanCollide then AR2_tp.clipSaved[part] = true part.CanCollide = false end end
+    else
+        for part in pairs(AR2_tp.clipSaved or {}) do pcall(function() if part.Parent then part.CanCollide = true end end) end
+        AR2_tp.clipSaved = nil
+    end
+end
+
+function AR2_tpPush(goalFn, mine, seconds)
+    local c = AR2_CFG.tp
+    local started = os.clock()
+    local stableSince, lastGoal = nil, nil
+    local needed = math.min(c.stableCs/100, seconds*0.6)
+    while AR2_tpAlive(mine) do
+        local root = AR2_tpRoot()
+        local goal = root and goalFn() or nil
+        if not root or not goal then return false end
+        if lastGoal then
+            if (root.Position - lastGoal).Magnitude >= c.snapBack then stableSince = nil else stableSince = stableSince or os.clock() end
+        end
+        AR2_tpWrite(root, goal)
+        lastGoal = goal.Position
+        AR2_tp.writes = AR2_tp.writes + 1
+        if stableSince and os.clock() - stableSince >= needed then return true end
+        if os.clock() - started >= seconds then return false end
+        AR2_tpYield()
+    end
+    return false
+end
+
+function AR2_tpHop(goalFn, mine)
+    local c = AR2_CFG.tp
+    local hop = math.max(4, c.hopStuds)
+    for _ = 1, 600 do
+        if not AR2_tpAlive(mine) then return false end
+        local root = AR2_tpRoot()
+        local goal = root and goalFn() or nil
+        if not root or not goal then return false end
+        local delta = goal.Position - root.Position
+        if delta.Magnitude <= hop then return AR2_tpPush(goalFn, mine, c.maxSeconds) end
+        local before = root.Position
+        local heading = delta.Unit
+        local waypoint = CFrame.new(before + heading * hop)
+        AR2_tp.phase = string.format("hopping %.0f studs left", delta.Magnitude)
+        local ok = AR2_tpPush(function() return waypoint end, mine, c.stableCs/100 + 1.5)
+        AR2_RunService.Heartbeat:Wait()
+        AR2_RunService.Heartbeat:Wait()
+        local after = AR2_tpRoot()
+        if not after then return false end
+        local gained = (after.Position - before):Dot(heading)
+        if ok and gained >= hop*0.5 then AR2_tp.hops = AR2_tp.hops + 1 else hop = hop/2 if hop < 4 then return false end end
+    end
+    return false
+end
+
+function AR2_tpHold(anchorPoint, mine)
+    local c = AR2_CFG.tp
+    if c.holdSecs <= 0 then return true end
+    local until_ = os.clock() + c.holdSecs
+    local last = anchorPoint.Position
+    AR2_tp.phase = "holding"
+    while os.clock() < until_ and AR2_tpAlive(mine) do
+        local dt = AR2_RunService.Heartbeat:Wait()
+        local root = AR2_tpRoot()
+        if root then
+            local jump = (root.Position - last).Magnitude
+            last = root.Position
+            if jump / math.max(dt, 1/240) >= 60 then
+                AR2_tp.pulls = AR2_tp.pulls + 1
+                if not AR2_tpPush(function() return anchorPoint end, mine, c.maxSeconds) then return false end
+                last = anchorPoint.Position
+            end
+        end
+    end
+    return true
+end
+
+function AR2_tpUnderground(goalFn, mine)
+    local c = AR2_CFG.tp
+    local root = AR2_tpRoot()
+    local goal = root and goalFn() or nil
+    if not root or not goal then return false end
+    local depth = math.max(5, c.burrowDepth)
+    AR2_tp.phase = "burrowing"
+    local under = Vector3.new(root.Position.X, AR2_tpGroundBelow(root.Position) - depth, root.Position.Z)
+    if c.burrowClip then AR2_tpNoclip(true) end
+    local landed = false
+    if AR2_tpPush(function() return CFrame.new(under) end, mine, c.maxSeconds) then
+        AR2_tp.phase = "crossing under"
+        local destination = goalFn()
+        if destination then
+            local floor = AR2_tpGroundBelow(destination.Position)
+            local cruise = math.min(under.Y, floor - depth)
+            local across = CFrame.new(destination.Position.X, cruise, destination.Position.Z)
+            if AR2_tpPush(function() return across end, mine, c.maxSeconds) then AR2_tp.hops = AR2_tp.hops + 1 end
+        end
+        AR2_tp.phase = "surfacing"
+        landed = AR2_tpPush(goalFn, mine, c.maxSeconds)
+        if c.burrowClip then AR2_tpNoclip(false) end
+    end
+    return landed
+end
+
+function AR2_tpTargetRoot()
+    local wanted = AR2_CFG.tp.target
+    if not wanted or wanted == "-" then return nil end
+    for _, entry in ipairs(AR2_api.players()) do if entry.name == wanted or entry.displayName == wanted then return entry.root end end
+    return nil
+end
+
+function AR2_tpOffset(cframe)
+    local c = AR2_CFG.tp
+    return cframe * CFrame.new(c.side, c.above, c.behind)
+end
+
+function AR2_tp.run(getGoal, label, keepGoing)
+    AR2_tp.gen = (AR2_tp.gen or 0) + 1
+    local mine = AR2_tp.gen
+    AR2_tp.cancel = true
+    task.spawn(function()
+        while AR2_tp.busy do task.wait() end
+        if AR2_tp.gen ~= mine then return end
+        local c = AR2_CFG.tp
+        AR2_tp.busy, AR2_tp.cancel = true, false
+        AR2_tp.writes, AR2_tp.attempt, AR2_tp.pulls, AR2_tp.hops = 0,0,0,0
+        local started = os.clock()
+        AR2_tpUnseat()
+        if c.guard then AR2_tpGuard.install() AR2_tpGuard.blocked = 0 AR2_tpGuard.active = true end
+        if c.force and not keepGoing then
+            AR2_tp.phase = "FORCED"
+            local until_ = os.clock() + c.forceSecs
+            while os.clock() < until_ and AR2_tpAlive(mine) do
+                local root = AR2_tpRoot()
+                local goal = root and getGoal() or nil
+                if not root or not goal then break end
+                AR2_tpWrite(root, goal)
+                AR2_tp.writes = AR2_tp.writes + 1
+                AR2_RunService.Heartbeat:Wait()
+            end
+            AR2_tpRelease()
+            local landing = AR2_tpRoot()
+            local goal = getGoal()
+            AR2_RunService.Heartbeat:Wait()
+            AR2_RunService.Heartbeat:Wait()
+            local drift = (landing and goal) and (landing.Position - goal.Position).Magnitude or -1
+            AR2_tp.lastResult = string.format("%s -- forced %d writes, %.0f off%s", label, AR2_tp.writes, drift, drift > c.snapBack and "  <-- server did NOT accept it" or "")
+        elseif keepGoing then
+            AR2_tp.phase = "following"
+            while AR2_tpAlive(mine) do
+                local root = AR2_tpRoot()
+                local goal = root and getGoal() or nil
+                if root and goal then AR2_tpWrite(root, goal) AR2_tp.writes = AR2_tp.writes + 1 end
+                AR2_tpYield()
+            end
+            AR2_tp.lastResult = string.format("%s -- followed, %d writes", label, AR2_tp.writes)
+        else
+            local landed = false
+            repeat
+                if c.underground and AR2_tpAlive(mine) then landed = AR2_tpUnderground(getGoal, mine) end
+                for attempt = 1, math.max(1, c.retries) do
+                    if landed or not AR2_tpAlive(mine) then break end
+                    AR2_tp.attempt = AR2_tp.attempt + 1
+                    AR2_tp.phase = string.format("attempt %d", AR2_tp.attempt)
+                    landed = AR2_tpPush(getGoal, mine, c.maxSeconds)
+                    if landed then break end
+                end
+                if not landed and c.chunked and AR2_tpAlive(mine) then landed = AR2_tpHop(getGoal, mine) end
+                if not landed then AR2_RunService.Heartbeat:Wait() end
+            until landed or not AR2_tpAlive(mine) or not c.neverGiveUp
+            if landed then
+                local resting = AR2_tpRoot()
+                local anchorPoint = resting and CFrame.new(resting.Position) or nil
+                AR2_tp.lastResult = string.format("%s -- landed in %.1fs (%d writes, %d attempts%s)", label, os.clock()-started, AR2_tp.writes, AR2_tp.attempt, AR2_tp.hops > 0 and (", "..AR2_tp.hops.." hops") or "")
+                local held = true
+                if anchorPoint then held = AR2_tpHold(anchorPoint, mine) end
+                if not held then AR2_tp.lastResult = string.format("%s -- landed, then pulled back %d time(s) and REFUSED to stay", label, AR2_tp.pulls)
+                elseif AR2_tp.pulls > 0 then AR2_tp.lastResult = AR2_tp.lastResult .. string.format(" -- pulled back %d time(s), re-sent", AR2_tp.pulls) end
+            else
+                AR2_tp.lastResult = string.format("%s -- REFUSED after %d attempts and %d writes", label, AR2_tp.attempt, AR2_tp.writes)
+            end
+        end
+        AR2_tpRelease()
+        if c.guard then task.delay(math.max(0, c.guardSecs), function() if not AR2_tp.busy then AR2_tpGuard.active = false end end) end
+        if AR2_tp.cancel and not string.find(AR2_tp.lastResult, "landed", 1, true) then AR2_tp.lastResult = label .. " -- stopped" end
+        AR2_tp.busy, AR2_tp.phase = false, "idle"
+    end)
+end
+
+function AR2_tp.stop() AR2_tp.cancel = true AR2_tp.gen = (AR2_tp.gen or 0) + 1 end
+
+function AR2_tp.plain()
+    local c = AR2_CFG.tp
+    c.everyFrame, c.intervalCs, c.stableCs = false, 9, 100
+    c.snapBack, c.maxSeconds, c.retries = 100, 8, 1
+    c.neverGiveUp, c.holdSecs = false, 0
+    c.everyFrame = true
+    c.chunked, c.hopStuds = true, 200
+    c.guard, c.force, c.underground = false, false, false
+    c.follow = false
+    AR2_tp.stop()
+    AR2_tpGuard.active = false
+    AR2_tp.lastResult = "settings back to original method"
+end
+
+function AR2_tp.toPosition(position, label) AR2_tp.run(function() return CFrame.new(position) end, label) end
+
+function AR2_tp.toPlayer()
+    local wanted = AR2_CFG.tp.target
+    if wanted == "-" then AR2_tp.lastResult = "no player picked" return end
+    AR2_tp.run(function() local root = AR2_tpTargetRoot() return root and AR2_tpOffset(root.CFrame) or nil end, wanted, false)
+end
+
+function AR2_tp.toMouse()
+    if not AR2_CFG.tp.clickTPOn then return end
+    local cam = Workspace.CurrentCamera
+    local screen = AR2_UserInputService:GetMouseLocation()
+    local ray = cam:ViewportPointToRay(screen.X, screen.Y)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { AR2_LocalPlayer.Character }
+    local hit = AR2_Workspace:Raycast(ray.Origin, ray.Direction * 10000, params)
+    if not hit then AR2_tp.lastResult = "mouse -- nothing under cursor" return end
+    local ground = AR2_tpGroundStand(hit.Position)
+    local pos = ground + Vector3.new(0, AR2_CFG.tp.clickLift, 0)
+    local char = AR2_LocalPlayer.Character
+    local hum = char and char:FindFirstChildWhichIsA("Humanoid")
+    if hum and hum.SeatPart then
+        local carModel = AR2_carPick()
+        if carModel then AR2_car.desyncTo(pos, "mouse car") return end
+    end
+    AR2_tp.toPosition(pos, "mouse")
+end
+
+function AR2_tp.dive()
+    local root = AR2_tpRoot()
+    if not root then return false end
+    AR2_tp.under = true
+    AR2_tp.underGoal = CFrame.new(root.Position.X, AR2_tpGroundBelow(root.Position) - math.max(5, AR2_CFG.tp.burrowDepth), root.Position.Z)
+    AR2_tpNoclip(true)
+    AR2_tp.run(function() local now = os.clock() if now - (AR2_tp.clipAt or 0) > 0.25 then AR2_tp.clipAt = now AR2_tpNoclip(true) end return AR2_tp.underGoal end, "under the map", true)
+    return true
+end
+
+function AR2_tp.surface(position)
+    local target = position or AR2_tp.surfaceTarget
+    if not target then
+        local root = AR2_tpRoot()
+        if root then target = root.Position + Vector3.new(0, math.max(5, AR2_CFG.tp.burrowDepth) + 6, 0) end
+    end
+    AR2_tp.under = false
+    AR2_tp.stop()
+    if not target then return end
+    task.spawn(function() while AR2_tp.busy do task.wait() end AR2_tp.toPosition(target, "surfaced") end)
+end
+
+function AR2_tp.saveWaypoint()
+    local root = AR2_tpRoot()
+    if not root then return false end
+    local list = AR2_CFG.tp.waypoints
+    local position = root.Position
+    list[#list+1] = { name = string.format("WP %d", #list+1), x = math.floor(position.X+0.5), y = math.floor(position.Y+0.5), z = math.floor(position.Z+0.5) }
+    return true
+end
+
+-- Respawn TP
+AR2_respawnTP = false
+function AR2_toggleRespawnTP(enabled)
+    AR2_respawnTP = enabled
+    AR2_CFG.tp.respawnTP = enabled
+    if enabled then
+        task.spawn(function()
+            while AR2_respawnTP do
+                AR2_tp.toPlayer()
+                task.wait(1)
+            end
+        end)
+    end
+end
+
+-- =============================================
+-- NOCLIP
+-- =============================================
+AR2_noclipConn = nil
+AR2_noclipKeys = {W=false,A=false,S=false,D=false,Space=false,LeftControl=false}
+local noclipParts = {}
+local noclipOffsets = {}
+local noclipRootPart = nil
+local isSitting = false
+
+function AR2_startNoclip()
+    if AR2_noclipConn then return end
+    local char = AR2_LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChild("Humanoid")
+    if not hum then return end
+    hum.Sit = true
+    hum.PlatformStand = true
+    isSitting = true
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local parts = {}
+    local radius = 15
+    for _, obj in ipairs(AR2_Workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and (obj.Position - root.Position).Magnitude <= radius then
+            table.insert(parts, obj)
+        end
+    end
+    if #parts == 0 then
+        AR2_CFG.misc.noclip = false
         return
     end
 
-    local character = LocalPlayer.Character
-    local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
-    if not humanoidRootPart then return end
-
-    local now = tick()
-    table.insert(positionHistory, { time = now, cframe = humanoidRootPart.CFrame })
-
-    -- Limit history size
-    while #positionHistory > 200 do
-        table.remove(positionHistory, 1)
+    noclipOffsets = {}
+    for _, part in ipairs(parts) do
+        noclipOffsets[part] = root.CFrame:Inverse() * part.CFrame
     end
+    noclipRootPart = root
+    noclipParts = parts
 
-    -- Find closest record to desired delay
-    local targetTime = now - backtrackDelay
-    local bestRecord = nil
-    local bestDiff = math.huge
-    for _, record in ipairs(positionHistory) do
-        local diff = math.abs(record.time - targetTime)
-        if diff < bestDiff then
-            bestDiff = diff
-            bestRecord = record
-        end
-    end
+    for _, part in ipairs(parts) do part.Anchored = true end
 
-    if bestRecord then
-        createFakeModel(character, bestRecord.cframe)
-    end
-end)
+    AR2_noclipConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_CFG.misc.noclip then AR2_stopNoclip() return end
+        if not noclipRootPart or not noclipRootPart.Parent then AR2_stopNoclip() return end
 
--- Toggle backtrackEnabled = true/false
-```
-
----
-
-## 8. Jump Circle
-
-Creates an expanding ring effect on the ground when the player jumps.
-
-```lua
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
-local TweenService = game:GetService("TweenService")
-
-local LocalPlayer = Players.LocalPlayer
-
--- Configuration
-local jumpCircleEnabled = false
-local circleColor = Color3.new(1, 1, 1)
-local startRadius = 1
-local endRadius = 12
-local duration = 1.2
-local iconTexture = "rbxassetid://89391029290549"   -- default icon
-
-local function spawnJumpCircle(position)
-    local part = Instance.new("Part")
-    part.Name = "JumpCircleEffect"
-    part.Shape = Enum.PartType.Block
-    part.Material = Enum.Material.ForceField
-    part.Transparency = 1
-    part.Color = circleColor
-    part.Size = Vector3.new(startRadius, 0.05, startRadius)
-    part.Anchored = true
-    part.CanCollide = false
-    part.CastShadow = false
-
-    -- Raycast downward to place on ground
-    local raycastParams = RaycastParams.new()
-    if LocalPlayer.Character then
-        raycastParams.FilterDescendantsInstances = {LocalPlayer.Character}
-    end
-    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-
-    local rayResult = Workspace:Raycast(position, Vector3.new(0, -15, 0), raycastParams)
-    if rayResult then
-        part.Position = rayResult.Position + Vector3.new(0, 0.1, 0)
-    else
-        part.Position = position - Vector3.new(0, 3, 0)
-    end
-
-    -- Decal
-    local decal = Instance.new("Decal")
-    decal.Texture = iconTexture
-    decal.Face = Enum.NormalId.Top
-    decal.Transparency = 0.1
-    decal.Color3 = circleColor
-    decal.Parent = part
-
-    part.Parent = Workspace
-
-    -- Tween expand
-    local expandTween = TweenService:Create(part, TweenInfo.new(duration, Enum.EasingStyle.Circular, Enum.EasingDirection.Out), {
-        Size = Vector3.new(endRadius, 0.05, endRadius)
-    })
-    local fadeTween = TweenService:Create(decal, TweenInfo.new(duration * 0.8, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
-        Transparency = 1
-    })
-
-    expandTween:Play()
-    fadeTween:Play()
-    expandTween.Completed:Once(function()
-        part:Destroy()
-    end)
-end
-
-local function onCharacterAdded(character)
-    local humanoid = character:WaitForChild("Humanoid")
-    humanoid.StateChanged:Connect(function(_, state)
-        if state == Enum.HumanoidStateType.Jumping and jumpCircleEnabled then
-            local rootPart = character:FindFirstChild("HumanoidRootPart")
-            if rootPart then
-                spawnJumpCircle(rootPart.Position)
-            end
-        end
-    end)
-end
-
-LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
-if LocalPlayer.Character then
-    onCharacterAdded(LocalPlayer.Character)
-end
-
--- Toggle jumpCircleEnabled = true/false
-```
-
----
-
-## 9. Instant Interact
-
-Makes interaction prompts (e.g., looting) complete instantly. Hooks the game's `GetInteractPromptData`.
-
-```lua
-local ReplicatedFirst = game:GetService("ReplicatedFirst")
-
-local instantInteractEnabled = false
-
-task.spawn(function()
-    local Framework = require(ReplicatedFirst:WaitForChild("Framework"))
-    Framework:WaitForLoaded()
-
-    local Interactables = Framework.Classes.Interactables
-    local originalGetInteractPromptData = Interactables.GetInteractPromptData
-
-    Interactables.GetInteractPromptData = function(...)
-        local data = originalGetInteractPromptData(...)
-        if instantInteractEnabled and data.Actions and data.Actions[1] then
-            data.Actions[1].Time = 0
-        end
-        return data
-    end
-end)
-
--- Toggle instantInteractEnabled = true/false
-```
-
----
-
-## 10. Container Persistence
-
-Prevents the game from closing containers when you walk away (blocks the "Inventory Closed" network event).
-
-```lua
-local ReplicatedFirst = game:GetService("ReplicatedFirst")
-
-local containerPersistenceEnabled = false
-
-task.spawn(function()
-    local Framework = require(ReplicatedFirst:WaitForChild("Framework"))
-    Framework:WaitForLoaded()
-
-    local Network = Framework.Libraries.Network
-    local originalSend = Network.Send
-
-    local function newSend(self, eventName, ...)
-        if eventName == "Inventory Closed" and containerPersistenceEnabled then
-            return  -- swallow the event
-        end
-        return originalSend(self, eventName, ...)
-    end
-
-    Network.Send = newSend
-end)
-
--- Toggle containerPersistenceEnabled = true/false
-```
-
----
-
-## 11. Player Jesus
-
-Allows walking on water by modifying water surface tags. Water surfaces with the "Swim Surface" tag are changed to "Player Jesus" to become solid.
-
-```lua
-local Workspace = game:GetService("Workspace")
-
-local playerJesusEnabled = false
-
-local function setPlayerJesus(enabled)
-    local water = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("Water") or Workspace:FindFirstChild("Water")
-    if not water then return end
-
-    for _, part in ipairs(water:GetDescendants()) do
-        if enabled then
-            if part:HasTag("Swim Surface") then
-                part:RemoveTag("Swim Surface")
-                part:AddTag("Player Jesus")
-            end
+        local hum2 = AR2_LocalPlayer.Character and AR2_LocalPlayer.Character:FindFirstChild("Humanoid")
+        if hum2 then
+            hum2.Sit = true
+            hum2.PlatformStand = true
+            isSitting = true
         else
-            if part:HasTag("Player Jesus") then
-                part:RemoveTag("Player Jesus")
-                part:AddTag("Swim Surface")
+            AR2_stopNoclip()
+            return
+        end
+
+        local cam = Workspace.CurrentCamera
+        local move = Vector3.zero
+        if AR2_noclipKeys.W then move += cam.CFrame.LookVector end
+        if AR2_noclipKeys.S then move -= cam.CFrame.LookVector end
+        if AR2_noclipKeys.D then move += cam.CFrame.RightVector end
+        if AR2_noclipKeys.A then move -= cam.CFrame.RightVector end
+        if AR2_noclipKeys.Space then move += Vector3.new(0,1,0) end
+        if AR2_noclipKeys.LeftControl then move -= Vector3.new(0,1,0) end
+
+        if move.Magnitude > 0 then
+            local delta = move.Unit * (AR2_CFG.misc.noclipSpeed or 90) * 0.05
+            local newCF = noclipRootPart.CFrame + delta
+            noclipRootPart.CFrame = newCF
+            for part, offset in pairs(noclipOffsets) do
+                if part and part.Parent then part.CFrame = newCF * offset end
+            end
+        end
+    end)
+end
+
+function AR2_stopNoclip()
+    AR2_CFG.misc.noclip = false
+    if AR2_noclipConn then AR2_noclipConn:Disconnect() AR2_noclipConn = nil end
+    for _, part in ipairs(noclipParts) do
+        if part and part.Parent then
+            part.Anchored = false
+            part.Velocity = Vector3.zero
+            part.RotVelocity = Vector3.zero
+        end
+    end
+    noclipParts = {}
+    noclipOffsets = {}
+    noclipRootPart = nil
+    for k in pairs(AR2_noclipKeys) do AR2_noclipKeys[k] = false end
+    local char = AR2_LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChild("Humanoid")
+        if hum then hum.Sit = false hum.PlatformStand = false isSitting = false end
+    end
+end
+
+function AR2_toggleNoclip(enabled)
+    if enabled and not AR2_noclipConn then
+        AR2_CFG.misc.noclip = true
+        AR2_startNoclip()
+    elseif not enabled and AR2_noclipConn then
+        AR2_stopNoclip()
+    end
+end
+
+AR2_UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    local k = input.KeyCode
+    if k == Enum.KeyCode.W then AR2_noclipKeys.W = true
+    elseif k == Enum.KeyCode.A then AR2_noclipKeys.A = true
+    elseif k == Enum.KeyCode.S then AR2_noclipKeys.S = true
+    elseif k == Enum.KeyCode.D then AR2_noclipKeys.D = true
+    elseif k == Enum.KeyCode.Space then AR2_noclipKeys.Space = true
+    elseif k == Enum.KeyCode.LeftControl then AR2_noclipKeys.LeftControl = true end
+end)
+AR2_UserInputService.InputEnded:Connect(function(input, gpe)
+    if gpe then return end
+    local k = input.KeyCode
+    if k == Enum.KeyCode.W then AR2_noclipKeys.W = false
+    elseif k == Enum.KeyCode.A then AR2_noclipKeys.A = false
+    elseif k == Enum.KeyCode.S then AR2_noclipKeys.S = false
+    elseif k == Enum.KeyCode.D then AR2_noclipKeys.D = false
+    elseif k == Enum.KeyCode.Space then AR2_noclipKeys.Space = false
+    elseif k == Enum.KeyCode.LeftControl then AR2_noclipKeys.LeftControl = false end
+end)
+
+-- =============================================
+-- INF JUMP
+-- =============================================
+AR2_infJumpConn = nil
+function AR2_startInfJump()
+    if AR2_infJumpConn then return end
+    AR2_infJumpConn = AR2_UserInputService.InputBegan:Connect(function(input, gpe)
+        if not AR2_CFG.misc.infJump then return end
+        if gpe then return end
+        if input.KeyCode ~= Enum.KeyCode.Space then return end
+        local char = AR2_LocalPlayer.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        hrp.Anchored = true
+        hrp.CFrame = hrp.CFrame + Vector3.new(0, 15, 0)
+        task.wait(0.03)
+        hrp.Anchored = false
+    end)
+end
+
+function AR2_stopInfJump()
+    if AR2_infJumpConn then AR2_infJumpConn:Disconnect() AR2_infJumpConn = nil end
+end
+
+function AR2_flyToPlayer(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return end
+    local char = AR2_LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local targetRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp or not targetRoot then return end
+
+    local anchoredParts = {}
+    local offsets = {}
+    for _, part in ipairs(AR2_Workspace:GetDescendants()) do
+        if part:IsA("BasePart") and not part.Anchored and (part.Position - hrp.Position).Magnitude <= 15 then
+            anchoredParts[#anchoredParts+1] = part
+            offsets[part] = hrp.CFrame:Inverse() * part.CFrame
+            part.Anchored = true
+        end
+    end
+
+    for _ = 1, 400 do
+        if not targetPlayer.Character or not targetRoot.Parent then break end
+        local targetPos = targetRoot.Position + Vector3.new(0, 2, 0)
+        local delta = targetPos - hrp.Position
+        if delta.Magnitude <= 3 then break end
+        local step = delta.Unit * math.min(15, delta.Magnitude)
+        hrp.CFrame = hrp.CFrame + step
+        for _, part in ipairs(anchoredParts) do
+            if part.Parent then part.CFrame = hrp.CFrame * offsets[part] end
+        end
+        AR2_RunService.Heartbeat:Wait()
+    end
+
+    for _, part in ipairs(anchoredParts) do
+        if part.Parent then part.Anchored = false end
+    end
+end
+
+-- =============================================
+-- BUNNY HOP
+-- =============================================
+AR2_bhopConn = nil
+
+function AR2_startBhop()
+    if AR2_bhopConn then return end
+    AR2_bhopConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_CFG.misc.bhop then AR2_stopBhop() return end
+        local char = AR2_LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum  = char and char:FindFirstChildWhichIsA("Humanoid")
+        if not root or not hum then return end
+        local moving = AR2_UserInputService:IsKeyDown(Enum.KeyCode.W)
+                    or AR2_UserInputService:IsKeyDown(Enum.KeyCode.A)
+                    or AR2_UserInputService:IsKeyDown(Enum.KeyCode.S)
+                    or AR2_UserInputService:IsKeyDown(Enum.KeyCode.D)
+        if moving and hum.FloorMaterial ~= Enum.Material.Air then
+            root.AssemblyLinearVelocity = Vector3.new(
+                root.AssemblyLinearVelocity.X,
+                AR2_CFG.misc.bhopHeight * 3,
+                root.AssemblyLinearVelocity.Z
+            )
+        end
+    end)
+end
+
+function AR2_stopBhop()
+    AR2_CFG.misc.bhop = false
+    if AR2_bhopConn then AR2_bhopConn:Disconnect() AR2_bhopConn = nil end
+end
+
+-- =============================================
+-- TP DASH (player)
+-- =============================================
+AR2_tpDashConn = nil
+AR2_tpDashLast = 0
+
+function AR2_startTpDash()
+    if AR2_tpDashConn then return end
+    AR2_CFG.misc.tpDash = true
+    AR2_tpDashLast = os.clock()
+    AR2_tpDashConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_CFG.misc.tpDash then AR2_stopTpDash() return end
+        local now = os.clock()
+        if now - AR2_tpDashLast < AR2_CFG.misc.tpDashInterval then return end
+        AR2_tpDashLast = now
+        local char = AR2_LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+        local fwd  = workspace.CurrentCamera.CFrame.LookVector
+        local flat = Vector3.new(fwd.X, 0, fwd.Z)
+        if flat.Magnitude < 0.01 then return end
+        local verticalOffset = AR2_CFG.misc.tpDashVert or 0
+        local movement = flat.Unit * AR2_CFG.misc.tpDashStuds + Vector3.new(0, verticalOffset, 0)
+        root.CFrame = root.CFrame + movement
+    end)
+end
+
+function AR2_stopTpDash()
+    AR2_CFG.misc.tpDash = false
+    if AR2_tpDashConn then AR2_tpDashConn:Disconnect() AR2_tpDashConn = nil end
+end
+
+-- =============================================
+-- VEHICLE TP DASH
+-- =============================================
+AR2_carDashConn = nil
+AR2_carDashLast = 0
+
+function AR2_startCarDash()
+    if AR2_carDashConn then return end
+    AR2_CFG.car.tpDash = true
+    AR2_carDashLast    = os.clock()
+
+    AR2_carDashConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_CFG.car.tpDash then AR2_stopCarDash() return end
+
+        local now = os.clock()
+        if now - AR2_carDashLast < AR2_CFG.car.tpDashInterval then return end
+        AR2_carDashLast = now
+
+        local model = AR2_carPick()
+        if not model then return end
+
+        local fwd  = workspace.CurrentCamera.CFrame.LookVector
+        local flat = Vector3.new(fwd.X, 0, fwd.Z)
+        if flat.Magnitude < 0.01 then return end
+        flat = flat.Unit
+
+        local verticalOffset = AR2_CFG.car.tpDashVert or 0
+        local movement = flat * AR2_CFG.car.tpDashStuds + Vector3.new(0, verticalOffset, 0)
+
+        local curPivot = model:GetPivot()
+        local newPivot = CFrame.new(
+            curPivot.Position + movement
+        ) * (curPivot - curPivot.Position)
+
+        local savedAnchor = {}
+        for _, p in ipairs(model:GetDescendants()) do
+            if p:IsA("BasePart") then
+                savedAnchor[p] = p.Anchored
+                p.Anchored                = true
+                p.AssemblyLinearVelocity  = Vector3.zero
+                p.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+
+        model:PivotTo(newPivot)
+
+        for p, wasAnchored in pairs(savedAnchor) do
+            if p and p.Parent then
+                p.Anchored                = wasAnchored
+                p.AssemblyLinearVelocity  = Vector3.zero
+                p.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+    end)
+end
+
+function AR2_stopCarDash()
+    AR2_CFG.car.tpDash = false
+    if AR2_carDashConn then
+        AR2_carDashConn:Disconnect()
+        AR2_carDashConn = nil
+    end
+end
+
+-- =============================================
+-- CAR SYSTEM
+-- =============================================
+AR2_car = { busy = false, cancel = false, gen = 0, lastResult = "", target = nil }
+
+function AR2_carBase(model) return model and (model:FindFirstChild("Base") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")) end
+
+function AR2_carPick()
+    local char = AR2_LocalPlayer.Character
+    local humanoid = char and char:FindFirstChildWhichIsA("Humanoid")
+    local seat = humanoid and humanoid.SeatPart
+    local container = AR2_Workspace:FindFirstChild("Vehicles")
+    if not container then return nil end
+    if seat then
+        local node = seat
+        while node and node.Parent do if node.Parent == container then return node end node = node.Parent end
+    end
+    local best, bestDist = nil, math.huge
+    local origin = AR2_localPosition()
+    for _, model in ipairs(container:GetChildren()) do
+        if model:IsA("Model") then
+            local base = AR2_carBase(model)
+            if base then
+                local d = (base.Position - origin).Magnitude
+                if d < bestDist then best, bestDist = model, d end
+            end
+        end
+    end
+    return best
+end
+
+function AR2_car.owned(model) local base = AR2_carBase(model) return base ~= nil and base.ReceiveAge == 0 end
+
+function AR2_car.stop() AR2_car.cancel = true AR2_car.gen = AR2_car.gen + 1 end
+
+function AR2_car.desyncTo(goal, label)
+    AR2_car.gen = AR2_car.gen + 1
+    local mine = AR2_car.gen
+    AR2_car.cancel = true
+    task.spawn(function()
+        while AR2_car.busy do task.wait() end
+        if AR2_car.gen ~= mine then return end
+        AR2_car.busy, AR2_car.cancel = true, false
+        local model = AR2_carPick()
+        local base = AR2_carBase(model)
+        if not base then AR2_car.lastResult = "no vehicle found" AR2_car.busy = false return end
+        AR2_car.target = model
+        local goalCF = CFrame.new(goal) * (model:GetPivot() - model:GetPivot().Position)
+        local wasAnchored = base.Anchored
+        base.Anchored = true
+        for _ = 1, 20 do
+            if AR2_car.cancel or AR2_car.gen ~= mine then break end
+            model:PivotTo(goalCF)
+            base.AssemblyLinearVelocity = Vector3.zero
+            AR2_RunService.Heartbeat:Wait()
+        end
+        base.Anchored = wasAnchored
+        base.AssemblyLinearVelocity = Vector3.zero
+        task.wait(1)
+        local off = (model:GetPivot().Position - goal).Magnitude
+        AR2_car.lastResult = string.format("%s -- %s (%.0f off)", label, off <= 30 and "moved" or "server pulled it back", off)
+        AR2_car.busy = false
+    end)
+end
+
+function AR2_car.rewriteTo(goal, label)
+    AR2_car.gen = AR2_car.gen + 1
+    local mine = AR2_car.gen
+    AR2_car.cancel = true
+    task.spawn(function()
+        while AR2_car.busy do task.wait() end
+        if AR2_car.gen ~= mine then return end
+        AR2_car.busy, AR2_car.cancel = true, false
+        local model = AR2_carPick()
+        local base = AR2_carBase(model)
+        if not base then AR2_car.lastResult = "no vehicle found" AR2_car.busy = false return end
+        AR2_car.target = model
+        local goalCF = CFrame.new(goal) * (model:GetPivot() - model:GetPivot().Position)
+        local stable, last = 0, nil
+        local until_ = os.clock() + AR2_CFG.tp.maxSeconds
+        while not AR2_car.cancel and AR2_car.gen == mine and os.clock() < until_ do
+            local now = model:GetPivot().Position
+            if last then
+                if (now - last).Magnitude >= AR2_CFG.tp.snapBack then stable = 0 else stable = stable + 1/60 end
+            end
+            model:PivotTo(goalCF)
+            base.AssemblyLinearVelocity = Vector3.zero
+            last = goalCF.Position
+            if stable >= AR2_CFG.tp.stableCs/100 then break end
+            AR2_RunService.Heartbeat:Wait()
+        end
+        local off = (model:GetPivot().Position - goal).Magnitude
+        AR2_car.lastResult = string.format("%s -- %s (%.0f off)", label, off <= 30 and "held" or "did not hold", off)
+        AR2_car.busy = false
+    end)
+end
+
+function AR2_car.toMe(mode)
+    local root = AR2_tpRoot()
+    if not root then AR2_car.lastResult = "no character" return end
+    local goal = root.Position + root.CFrame.LookVector * 12 + Vector3.new(0, 5, 0)
+    if mode == "desync" then AR2_car.desyncTo(goal, "to me") else AR2_car.rewriteTo(goal, "to me") end
+end
+
+function AR2_car.toCursor(mode)
+    local cam = Workspace.CurrentCamera
+    local screen = AR2_UserInputService:GetMouseLocation()
+    local ray = cam:ViewportPointToRay(screen.X, screen.Y)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { AR2_LocalPlayer.Character, AR2_car.target }
+    local hit = AR2_Workspace:Raycast(ray.Origin, ray.Direction * 10000, params)
+    if not hit then AR2_car.lastResult = "cursor -- nothing there" return end
+    local goal = hit.Position + Vector3.new(0, 6, 0)
+    if mode == "desync" then AR2_car.desyncTo(goal, "to cursor") else AR2_car.rewriteTo(goal, "to cursor") end
+end
+
+-- =============================================
+-- MAP SYSTEM
+-- =============================================
+do
+    AR2_MAP_ORIGIN = CFrame.new(Vector3.new(-7349.55, 0, -6187.35), Vector3.new(-7349.55, 0, -6186.35))
+    AR2_MAP_SX, AR2_MAP_SZ = -13499.068, -12386.184
+    AR2_MAP_IMAGE = "rbxassetid://102357544057594"
+    AR2_IMG_W, AR2_IMG_H = 1024, 925
+
+    function AR2_worldToMap(p) local r = AR2_MAP_ORIGIN:PointToObjectSpace(p) return r.X / AR2_MAP_SX, r.Z / AR2_MAP_SZ end
+    function AR2_mapToWorld(u, v) return AR2_MAP_ORIGIN:PointToWorldSpace(Vector3.new(u * AR2_MAP_SX, 0, v * AR2_MAP_SZ)) end
+
+    function AR2_groundY(x, z)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { AR2_LocalPlayer.Character }
+        params.IgnoreWater = false
+        local hit = AR2_Workspace:Raycast(Vector3.new(x, 5000, z), Vector3.new(0, -12000, 0), params)
+        return hit and hit.Position.Y or nil
+    end
+
+    AR2_mapGui = nil
+    AR2_mapConn = nil
+    AR2_mapImg = nil
+    AR2_youDot = nil
+    AR2_dotPool = {}
+
+    function AR2_buildMap()
+        local host = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+        AR2_mapGui = Instance.new("ScreenGui")
+        AR2_mapGui.Name = "ar2_map" AR2_mapGui.ResetOnSpawn = false AR2_mapGui.IgnoreGuiInset = true
+        AR2_mapGui.DisplayOrder = 999998 AR2_mapGui.Enabled = false AR2_mapGui.Parent = host
+        local dim = Instance.new("TextButton")
+        dim.Size = UDim2.fromScale(1,1) dim.BackgroundColor3 = Color3.new(0,0,0)
+        dim.BackgroundTransparency = 0.35 dim.AutoButtonColor = false dim.Text = "" dim.Parent = AR2_mapGui
+        local W = 720
+        local H = math.floor(W * AR2_IMG_H / AR2_IMG_W)
+        local panel = Instance.new("Frame")
+        panel.AnchorPoint = Vector2.new(0.5,0.5) panel.Position = UDim2.fromScale(0.5,0.5)
+        panel.Size = UDim2.fromOffset(W, H+34) panel.BackgroundColor3 = Color3.fromRGB(15,16,20)
+        panel.BorderSizePixel = 0 panel.Parent = AR2_mapGui
+        local pc = Instance.new("UICorner") pc.CornerRadius = UDim.new(0,8) pc.Parent = panel
+        local title = Instance.new("TextLabel")
+        title.BackgroundTransparency = 1 title.Position = UDim2.fromOffset(12,0) title.Size = UDim2.new(1,-80,0,34)
+        title.Font = Enum.Font.GothamBold title.TextSize = 14 title.TextXAlignment = Enum.TextXAlignment.Left
+        title.TextColor3 = Color3.fromRGB(225,225,235) title.Text = "Map" title.Parent = panel
+        local close = Instance.new("TextButton")
+        close.Size = UDim2.fromOffset(26,22) close.Position = UDim2.new(1,-32,0,6) close.BackgroundColor3 = Color3.fromRGB(40,42,52)
+        close.Text = "X" close.Font = Enum.Font.GothamBold close.TextSize = 13 close.TextColor3 = Color3.fromRGB(230,120,120)
+        close.BorderSizePixel = 0 close.Parent = panel
+        local cc = Instance.new("UICorner") cc.CornerRadius = UDim.new(0,5) cc.Parent = close
+        AR2_mapImg = Instance.new("ImageButton")
+        AR2_mapImg.Position = UDim2.fromOffset(0,34) AR2_mapImg.Size = UDim2.fromOffset(W,H) AR2_mapImg.BackgroundColor3 = Color3.fromRGB(20,24,30)
+        AR2_mapImg.Image = AR2_MAP_IMAGE AR2_mapImg.ScaleType = Enum.ScaleType.Stretch AR2_mapImg.AutoButtonColor = false AR2_mapImg.BorderSizePixel = 0 AR2_mapImg.Parent = panel
+        local ic = Instance.new("UICorner") ic.CornerRadius = UDim.new(0,6) ic.Parent = AR2_mapImg
+        AR2_youDot = Instance.new("Frame")
+        AR2_youDot.AnchorPoint = Vector2.new(0.5,0.5) AR2_youDot.Size = UDim2.fromOffset(9,9)
+        AR2_youDot.BackgroundColor3 = Color3.fromRGB(255,220,60) AR2_youDot.BorderSizePixel = 0 AR2_youDot.ZIndex = 5 AR2_youDot.Parent = AR2_mapImg
+        local yc = Instance.new("UICorner") yc.CornerRadius = UDim.new(1,0) yc.Parent = AR2_youDot
+        dim.MouseButton1Click:Connect(function() AR2_tp.toggleMap(false) end)
+        close.MouseButton1Click:Connect(function() AR2_tp.toggleMap(false) end)
+        AR2_mapImg.Activated:Connect(function()
+            local mouse = AR2_UserInputService:GetMouseLocation()
+            local abs, sz = AR2_mapImg.AbsolutePosition, AR2_mapImg.AbsoluteSize
+            if sz.X <= 0 or sz.Y <= 0 then return end
+            local u = math.clamp((mouse.X - abs.X) / sz.X, 0, 1)
+            local v = math.clamp((mouse.Y - abs.Y) / sz.Y, 0, 1)
+            local w = AR2_mapToWorld(u, v)
+            local y = AR2_groundY(w.X, w.Z)
+            local dest = Vector3.new(w.X, (y or 200) + 6, w.Z)
+            local label = string.format("map (%.0f, %.0f)", w.X, w.Z)
+            local char = AR2_LocalPlayer.Character
+            local hum  = char and char:FindFirstChildWhichIsA("Humanoid")
+            local seated = hum and hum.SeatPart ~= nil
+            if seated then
+                local carModel = AR2_carPick()
+                if carModel then AR2_car.desyncTo(dest, label) AR2_tp.toggleMap(false) return end
+            end
+            AR2_tp.toPosition(dest, label)
+            AR2_tp.toggleMap(false)
+        end)
+    end
+
+    function AR2_refreshDots()
+        local root = AR2_LocalPlayer.Character and AR2_LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if root then
+            local u, v = AR2_worldToMap(root.Position)
+            AR2_youDot.Position = UDim2.fromScale(u, v)
+            AR2_youDot.Visible = true
+        else AR2_youDot.Visible = false end
+        local i = 0
+        for _, pl in ipairs(AR2_Players:GetPlayers()) do
+            local r = pl ~= AR2_LocalPlayer and pl.Character and pl.Character:FindFirstChild("HumanoidRootPart")
+            if r then
+                i = i + 1
+                local d = AR2_dotPool[i]
+                if not d then
+                    d = Instance.new("Frame")
+                    d.AnchorPoint = Vector2.new(0.5,0.5) d.Size = UDim2.fromOffset(7,7)
+                    d.BackgroundColor3 = Color3.fromRGB(255,90,90) d.BorderSizePixel = 0 d.ZIndex = 4 d.Parent = AR2_mapImg
+                    local dc = Instance.new("UICorner") dc.CornerRadius = UDim.new(1,0) dc.Parent = d
+                    AR2_dotPool[i] = d
+                end
+                local u, v = AR2_worldToMap(r.Position)
+                d.Position = UDim2.fromScale(u, v) d.Visible = true
+            end
+        end
+        for j = i+1, #AR2_dotPool do AR2_dotPool[j].Visible = false end
+    end
+
+    function AR2_tp.toggleMap(on)
+        if not AR2_mapGui or not AR2_mapGui.Parent then AR2_buildMap() end
+        if on == nil then on = not AR2_mapGui.Enabled end
+        AR2_mapGui.Enabled = on
+        if on then
+            AR2_refreshDots()
+            if not AR2_mapConn then
+                local acc = 0
+                AR2_mapConn = AR2_RunService.RenderStepped:Connect(function(dt) acc = acc + dt if acc >= 0.2 then acc = 0 pcall(AR2_refreshDots) end end)
+            end
+        elseif AR2_mapConn then
+            AR2_mapConn:Disconnect()
+            AR2_mapConn = nil
+        end
+    end
+end
+
+-- =============================================
+-- RADAR
+-- =============================================
+AR2_radar = { running = false, layer = "off", players = 0, drawn = 0, sample = "" }
+do
+    local MAP_ORIGIN = CFrame.new(Vector3.new(-7349.55, 0, -6187.35), Vector3.new(-7349.55, 0, -6186.35))
+    local MAP_SX, MAP_SZ = -13499.068, -12386.184
+    local function worldToMap(position) local rel = MAP_ORIGIN:PointToObjectSpace(position) return rel.X / MAP_SX, rel.Z / MAP_SZ end
+    local RADAR_COLOR = { normal = Color3.fromRGB(120,190,255), armed = Color3.fromRGB(255,150,50), localP = Color3.fromRGB(255,220,60) }
+    local radarConn, radarDots = nil, {}
+    local radarLayer, radarMarker, radarNextScan = nil, nil, 0
+
+    local function radarRendered(gui)
+        if gui.AbsoluteSize.X <= 0 then return false end
+        local node = gui
+        while node do
+            if node:IsA("ScreenGui") then return node.Enabled end
+            if node:IsA("GuiObject") and not node.Visible then return false end
+            node = node.Parent
+        end
+        return true
+    end
+
+    local function radarMarkerLayer()
+        if radarMarker and radarMarker.Parent and radarRendered(radarMarker) then return radarLayer, radarMarker, "ok" end
+        local now = os.clock()
+        if now < radarNextScan then return nil, nil, "map not open" end
+        radarNextScan = now + 5.0
+        radarLayer, radarMarker = nil, nil
+        local gui = AR2_LocalPlayer:FindFirstChild("PlayerGui")
+        if not gui then return nil, nil, "no PlayerGui" end
+        local anyMarker = false
+        for _, descendant in ipairs(gui:GetDescendants()) do
+            if descendant.Name == "LocalMarker" and descendant:IsA("GuiObject") then
+                anyMarker = true
+                if radarRendered(descendant) then
+                    radarLayer, radarMarker = descendant.Parent, descendant
+                    return descendant.Parent, descendant, "ok"
+                end
+            end
+        end
+        return nil, nil, anyMarker and "map not open" or "no LocalMarker"
+    end
+
+    local function radarMakeDot(zbase)
+        local dot = Instance.new("Frame")
+        dot.Name = "ar2_dot" dot.AnchorPoint = Vector2.new(0.5,0.5) dot.Size = UDim2.fromOffset(12,12)
+        dot.BorderSizePixel = 0 dot.ZIndex = zbase + 5
+        local round = Instance.new("UICorner") round.CornerRadius = UDim.new(1,0) round.Parent = dot
+        local edge = Instance.new("UIStroke") edge.Color = Color3.fromRGB(0,0,0) edge.Thickness = 1.5 edge.Transparency = 0.25 edge.Parent = dot
+        local name = Instance.new("TextLabel")
+        name.Name = "Name" name.BackgroundTransparency = 1 name.AnchorPoint = Vector2.new(0,0.5) name.Position = UDim2.fromOffset(10,0)
+        name.Size = UDim2.fromOffset(200,28)
+        name.Font = Enum.Font.GothamBold name.TextSize = 12 name.TextXAlignment = Enum.TextXAlignment.Left
+        name.TextStrokeTransparency = 0.4 name.ZIndex = zbase + 6 name.Parent = dot
+        return dot
+    end
+
+    local function radarColorFor(entry)
+        if entry.isLocal then return RADAR_COLOR.localP end
+        if AR2_CFG.radar.armedColor and entry.armed then return RADAR_COLOR.armed end
+        return RADAR_COLOR.normal
+    end
+
+    local function radarClearDots() for name, dot in pairs(radarDots) do dot:Destroy() radarDots[name] = nil end end
+
+    local function radarStep()
+        if not AR2_CFG.radar.on then if next(radarDots) then radarClearDots() end AR2_radar.layer, AR2_radar.players, AR2_radar.drawn = "disabled", 0, 0 return end
+        local parent, localMarker, why = radarMarkerLayer()
+        AR2_radar.layer = why
+        if not parent then if next(radarDots) then radarClearDots() end AR2_radar.players, AR2_radar.drawn = 0, 0 return end
+        local live = AR2_api.players(true)
+        AR2_radar.players = #live
+        local zbase = localMarker and localMarker.ZIndex or 10
+        local drawn = 0
+        local seen = {}
+        for _, entry in ipairs(live) do
+            if AR2_CFG.radar.localToo or not entry.isLocal then
+                seen[entry.name] = true
+                local dot = radarDots[entry.name]
+                if not dot or dot.Parent ~= parent then
+                    if dot then dot:Destroy() end
+                    dot = radarMakeDot(zbase)
+                    dot.Parent = parent
+                    radarDots[entry.name] = dot
+                end
+                local x, z = worldToMap(entry.root.Position)
+                dot.Position = UDim2.fromScale(x, z)
+                local colour = radarColorFor(entry)
+                dot.BackgroundColor3 = colour
+                local label = dot:FindFirstChild("Name")
+                if label then
+                    local parts = {}
+                    if AR2_CFG.radar.names then parts[#parts+1] = entry.name end
+                    if AR2_CFG.radar.weapon and entry.item then parts[#parts+1] = "["..entry.item.."]" end
+                    if AR2_CFG.radar.dist then parts[#parts+1] = string.format("%.0fs", entry.distance) end
+                    label.Text = table.concat(parts, "  ")
+                    label.Visible = #parts > 0
+                    label.TextColor3 = colour
+                end
+                drawn = drawn + 1
+            end
+        end
+        AR2_radar.drawn = drawn
+        for name, dot in pairs(radarDots) do if not seen[name] then dot:Destroy() radarDots[name] = nil end end
+    end
+
+    function AR2_radar.start()
+        if radarConn then return end
+        AR2_radar.running = true
+        AR2_radar.layer = "starting"
+        radarConn = AR2_RunService.RenderStepped:Connect(function() local ok, err = pcall(radarStep) if not ok then AR2_radar.layer = "error: "..tostring(err) end end)
+    end
+
+    function AR2_radar.stop()
+        AR2_radar.running = false
+        if radarConn then radarConn:Disconnect() radarConn = nil end
+        radarClearDots()
+        AR2_radar.layer, AR2_radar.players, AR2_radar.drawn = "off", 0, 0
+    end
+
+    function AR2_radar.destroy() AR2_radar.stop() radarLayer, radarMarker = nil, nil radarNextScan = 0 end
+end
+
+-- =============================================
+-- SPEED HACK
+-- =============================================
+AR2_speed = { enabled = false, resets = 0, lastReset = nil }
+AR2_speedConn = nil
+AR2_lastPosition = nil
+AR2_BASE_SPEED = 16
+AR2_RESET_JUMP = 25
+
+function AR2_localRig()
+    local char = AR2_LocalPlayer.Character
+    if not char then return nil, nil, nil end
+    return char, char:FindFirstChild("HumanoidRootPart"), char:FindFirstChildWhichIsA("Humanoid")
+end
+
+function AR2_wishDirection()
+    local cam = Workspace.CurrentCamera
+    local dir = Vector3.zero
+    if AR2_UserInputService:IsKeyDown(Enum.KeyCode.W) then dir = dir + cam.CFrame.LookVector end
+    if AR2_UserInputService:IsKeyDown(Enum.KeyCode.S) then dir = dir - cam.CFrame.LookVector end
+    if AR2_UserInputService:IsKeyDown(Enum.KeyCode.D) then dir = dir + cam.CFrame.RightVector end
+    if AR2_UserInputService:IsKeyDown(Enum.KeyCode.A) then dir = dir - cam.CFrame.RightVector end
+    dir = Vector3.new(dir.X, 0, dir.Z)
+    if dir.Magnitude < 0.01 then return nil end
+    return dir.Unit
+end
+
+function AR2_detectReset(position)
+    if not AR2_lastPosition then AR2_lastPosition = position return false end
+    local jump = (position - AR2_lastPosition).Magnitude
+    AR2_lastPosition = position
+    if jump < AR2_RESET_JUMP then return false end
+    AR2_speed.resets = AR2_speed.resets + 1
+    return true
+end
+
+function AR2_stepSpeed(dt)
+    local c = AR2_CFG.speed
+    local char, root = AR2_localRig()
+    if not c.on or not root then AR2_lastPosition = nil return end
+    if AR2_detectReset(root.Position) and c.adaptive then
+        local reduced = math.max(c.minPct, c.pct - 10)
+        if reduced ~= c.pct then c.pct = reduced end
+        return
+    end
+    if c.pct <= 100 then return end
+    if c.pulse then
+        local onTime = c.pulseOn/100
+        local offTime = c.pulseOff/100
+        local period = onTime + offTime
+        if period > 0 and (os.clock() % period) >= onTime then return end
+    end
+    local dir = AR2_wishDirection()
+    if not dir then return end
+    local extra = AR2_BASE_SPEED * (c.pct/100 - 1) * dt
+    if extra <= 0 then return end
+    if c.collide then
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { char }
+        if AR2_Workspace:Raycast(root.Position, dir * (extra + 2), params) then return end
+    end
+    if c.airborne then
+        local grounded = math.abs(root.AssemblyLinearVelocity.Y) < 1
+        if grounded then root.CFrame = root.CFrame + Vector3.new(0, 3.5, 0) end
+    end
+    if c.spoof then
+        local folder = char:FindFirstChild("Animator")
+        local state = folder and folder:FindFirstChild("MoveState")
+        if state and state.Value ~= c.spoofAs then state.Value = c.spoofAs end
+    end
+    root.CFrame = root.CFrame + dir * extra
+    AR2_lastPosition = root.Position
+end
+
+function AR2_speed.start()
+    if AR2_speedConn then return end
+    AR2_speed.enabled = true
+    AR2_speedConn = AR2_RunService.RenderStepped:Connect(function(dt) local ok, err = pcall(AR2_stepSpeed, dt) if not ok then warn("[speed] "..tostring(err)) end end)
+end
+
+function AR2_speed.stop()
+    AR2_speed.enabled = false
+    if AR2_speedConn then AR2_speedConn:Disconnect() AR2_speedConn = nil end
+end
+
+-- =============================================
+-- CAR MODS
+-- =============================================
+AR2_carMods = { running = false, touched = 0, note = "off" }
+AR2_touched = {}
+AR2_carLoopGen = 0
+
+function AR2_carConfig(model)
+    local module = model:FindFirstChild("Config")
+    if not (module and module:IsA("ModuleScript")) then return nil end
+    local ok, tbl = pcall(require, module)
+    return (ok and type(tbl) == "table") and tbl or nil
+end
+
+function AR2_forEachDamageMod(cfg, fn)
+    if type(cfg.Health) ~= "table" then return end
+    for _, group in pairs(cfg.Health) do
+        if type(group) == "table" and type(group.DamageModifiers) == "table" then
+            for key in pairs(group.DamageModifiers) do fn(group.DamageModifiers, key) end
+        end
+        if type(group) == "table" and not group.DamageModifiers then
+            for _, sub in pairs(group) do
+                if type(sub) == "table" and type(sub.DamageModifiers) == "table" then
+                    for key in pairs(sub.DamageModifiers) do fn(sub.DamageModifiers, key) end
+                end
             end
         end
     end
 end
 
--- Usage:
--- setPlayerJesus(true)   -- enable
--- setPlayerJesus(false)  -- disable
-```
+function AR2_snapshot(cfg)
+    if AR2_touched[cfg] then return AR2_touched[cfg] end
+    local saved = { torques = {}, grips = {}, dmg = {} }
+    if type(cfg.Fuel) == "table" then saved.burnRate = cfg.Fuel.BurnRate end
+    if type(cfg.Physics) == "table" then
+        saved.driveSpeed = cfg.Physics.DriveSpeed
+        saved.reverseSpeed = cfg.Physics.ReverseSpeed
+        if type(cfg.Physics.Wheels) == "table" then
+            for name, wheel in pairs(cfg.Physics.Wheels) do
+                if type(wheel) == "table" and wheel.DriveMotorTorque then saved.torques[name] = wheel.DriveMotorTorque end
+            end
+        end
+        if type(cfg.Physics.MaterialGrip) == "table" then
+            for name, material in pairs(cfg.Physics.MaterialGrip) do
+                if type(material) == "table" and material.Speed then saved.grips[name] = material.Speed end
+            end
+        end
+    end
+    if type(cfg.ExitDamage) == "table" then saved.exitMax = cfg.ExitDamage.MaxSpeed end
+    AR2_forEachDamageMod(cfg, function(t, k) saved.dmg[#saved.dmg+1] = { t = t, k = k, v = t[k] } end)
+    AR2_touched[cfg] = saved
+    return saved
+end
 
----
+function AR2_applyTo(cfg)
+    local c = AR2_CFG.car
+    local saved = AR2_snapshot(cfg)
+    if c.fuel and type(cfg.Fuel) == "table" then cfg.Fuel.BurnRate = 0 end
+    if c.boost and type(cfg.Physics) == "table" then
+        cfg.Physics.DriveSpeed = c.speed
+        cfg.Physics.ReverseSpeed = math.floor(c.speed/2)
+        if type(cfg.Physics.Wheels) == "table" then
+            for name, wheel in pairs(cfg.Physics.Wheels) do
+                if type(wheel) == "table" and saved.torques[name] then wheel.DriveMotorTorque = saved.torques[name] * c.torque end
+            end
+        end
+        if type(cfg.Physics.MaterialGrip) == "table" then
+            for _, material in pairs(cfg.Physics.MaterialGrip) do
+                if type(material) == "table" and material.Speed then material.Speed = 1 end
+            end
+        end
+        if type(cfg.ExitDamage) == "table" then cfg.ExitDamage.MaxSpeed = 1e6 end
+    end
+    if c.god then AR2_forEachDamageMod(cfg, function(t, k) t[k] = 0 end) end
+end
 
-### Additional Notes
+function AR2_restoreOne(cfg)
+    local saved = AR2_touched[cfg]
+    if not saved then return end
+    if type(cfg.Fuel) == "table" and saved.burnRate ~= nil then cfg.Fuel.BurnRate = saved.burnRate end
+    if type(cfg.Physics) == "table" then
+        if saved.driveSpeed ~= nil then cfg.Physics.DriveSpeed = saved.driveSpeed end
+        if saved.reverseSpeed ~= nil then cfg.Physics.ReverseSpeed = saved.reverseSpeed end
+        if type(cfg.Physics.Wheels) == "table" then
+            for name, wheel in pairs(cfg.Physics.Wheels) do
+                if type(wheel) == "table" and saved.torques[name] then wheel.DriveMotorTorque = saved.torques[name] end
+            end
+        end
+        if type(cfg.Physics.MaterialGrip) == "table" then
+            for name, material in pairs(cfg.Physics.MaterialGrip) do
+                if type(material) == "table" and saved.grips[name] then material.Speed = saved.grips[name] end
+            end
+        end
+    end
+    if type(cfg.ExitDamage) == "table" and saved.exitMax ~= nil then cfg.ExitDamage.MaxSpeed = saved.exitMax end
+    for _, entry in ipairs(saved.dmg) do entry.t[entry.k] = entry.v end
+    AR2_touched[cfg] = nil
+end
 
-- Some features (Auto Reload, Instant Interact, Container Persistence) rely on the game's `Framework` being loaded from `ReplicatedFirst`. Ensure you wait for it with `Framework:WaitForLoaded()`.
-- The `Self Backtrack` feature creates a fake model but does **not** make it invisible to other players; it's only for your own visual reference. The original code also included a `LocalTransparencyModifier` to hide it when the camera is close, but that's optional.
-- The `Jump Circle` uses a custom icon; you can change `iconTexture` to any decal ID.
-- For all features, you need to integrate the toggle variables into your own UI or command system.
+function AR2_restoreAll()
+    for cfg in pairs(AR2_touched) do AR2_restoreOne(cfg) end
+    AR2_carMods.touched = 0
+end
 
-If you need the complete UI definitions that were in the original script, let me know, but they are tightly coupled to the custom UI library used there. The above code provides the functional core.
+function AR2_occupiedCar()
+    local character = AR2_LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildWhichIsA("Humanoid")
+    local seat = humanoid and humanoid.SeatPart
+    if not (seat and AR2_Vehicles) then return nil end
+    local node = seat
+    while node and node.Parent do if node.Parent == AR2_Vehicles then return node end node = node.Parent end
+    return nil
+end
+
+function AR2_sweep()
+    if not AR2_Vehicles or not AR2_Vehicles.Parent then AR2_Vehicles = AR2_Workspace:FindFirstChild("Vehicles") end
+    if not AR2_Vehicles then AR2_carMods.note = "no Vehicles folder" return end
+    local count = 0
+    if AR2_CFG.car.allCars then
+        for _, model in ipairs(AR2_Vehicles:GetChildren()) do
+            if model:IsA("Model") then
+                local cfg = AR2_carConfig(model)
+                if cfg then AR2_applyTo(cfg) count = count + 1 end
+            end
+        end
+    else
+        local model = AR2_occupiedCar()
+        local cfg = model and AR2_carConfig(model)
+        if cfg then AR2_applyTo(cfg) count = count + 1 end
+    end
+    AR2_carMods.touched = count
+    local parts_ = {}
+    if AR2_CFG.car.fuel then parts_[#parts_+1] = "fuel" end
+    if AR2_CFG.car.boost then parts_[#parts_+1] = "boost" end
+    if AR2_CFG.car.god then parts_[#parts_+1] = "god" end
+    AR2_carMods.note = string.format("%s  --  %d car%s tuned%s", table.concat(parts_, ", "), count, count == 1 and "" or "s", AR2_CFG.car.allCars and "  (all)" or "  (yours)")
+end
+
+function AR2_carMods.apply()
+    local wanted = AR2_CFG.car.fuel or AR2_CFG.car.boost or AR2_CFG.car.god
+    AR2_restoreAll()
+    AR2_carLoopGen = AR2_carLoopGen + 1
+    if not wanted then AR2_carMods.running = false AR2_carMods.note = "off" return end
+    AR2_carMods.running = true
+    pcall(AR2_sweep)
+    local mine = AR2_carLoopGen
+    task.spawn(function()
+        while mine == AR2_carLoopGen and AR2_carMods.running do
+            task.wait(1)
+            if mine ~= AR2_carLoopGen then break end
+            pcall(AR2_sweep)
+        end
+    end)
+end
+
+function AR2_carMods.destroy()
+    AR2_carLoopGen = AR2_carLoopGen + 1
+    AR2_carMods.running = false
+    AR2_restoreAll()
+    AR2_carMods.note = "off"
+end
+-- =============================================
+-- AR2 Script - Modified Part 4/4 (Fixed)
+-- =============================================
+
+-- =============================================
+-- PLAYER OUTLINES (CHARM)
+-- =============================================
+AR2_charmHighlights = {}
+function AR2_getCharmColor()
+    if AR2_charmMode == "BlackWhite" then
+        local gray = AR2_charmGray / 100
+        return Color3.fromRGB(gray*255, gray*255, gray*255)
+    else
+        return Color3.fromHSV(AR2_charmHue/360, 1, 1)
+    end
+end
+
+function AR2_applyCharmToCharacter(char)
+    if not char then return end
+    local existing = AR2_charmHighlights[char]
+    if existing then existing:Destroy() AR2_charmHighlights[char] = nil end
+    if AR2_charmEnabled then
+        local fillColor = AR2_getCharmColor()
+        local outlineColor = Color3.new(1,1,1)
+        local fillTransparency = 0.3
+        if AR2_charmMode == "BlackWhite" then outlineColor = Color3.new(0,0,0) end
+        local highlight = Instance.new("Highlight")
+        highlight.FillColor = fillColor
+        highlight.OutlineColor = outlineColor
+        highlight.FillTransparency = fillTransparency
+        highlight.OutlineTransparency = 0
+        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        highlight.Adornee = char
+        highlight.Parent = char
+        AR2_charmHighlights[char] = highlight
+    end
+end
+
+function AR2_applyCharm(char)
+    AR2_applyCharmToCharacter(char)
+    if AR2_CFG.misc.globalCharm then
+        for _, player in ipairs(AR2_Players:GetPlayers()) do
+            if player ~= AR2_LocalPlayer and player.Character then
+                AR2_applyCharmToCharacter(player.Character)
+            end
+        end
+    end
+end
+
+function AR2_toggleCharm(enabled)
+    AR2_charmEnabled = enabled
+    if enabled then
+        AR2_applyCharm(AR2_LocalPlayer.Character)
+        if AR2_charmRainbow and not AR2_charmRainbowConn then
+            AR2_charmRainbowConn = AR2_RunService.Heartbeat:Connect(function()
+                if not AR2_charmEnabled or not AR2_charmRainbow then
+                    if AR2_charmRainbowConn then AR2_charmRainbowConn:Disconnect() AR2_charmRainbowConn = nil end
+                    return
+                end
+                AR2_charmHue = (AR2_charmHue + 0.5) % 360
+                local col = Color3.fromHSV(AR2_charmHue/360, 1, 1)
+                for _, highlight in pairs(AR2_charmHighlights) do highlight.FillColor = col end
+            end)
+        end
+    else
+        for _, highlight in pairs(AR2_charmHighlights) do highlight:Destroy() end
+        AR2_charmHighlights = {}
+        if AR2_charmRainbowConn then AR2_charmRainbowConn:Disconnect() AR2_charmRainbowConn = nil end
+    end
+end
+
+function AR2_setCharmMode(mode)
+    AR2_charmMode = mode
+    AR2_CFG.misc.charmMode = mode
+    if AR2_charmEnabled then AR2_applyCharm(AR2_LocalPlayer.Character) end
+    AR2_markDirty()
+end
+
+function AR2_setCharmHue(hue)
+    AR2_charmHue = hue % 360
+    AR2_CFG.misc.charmHue = AR2_charmHue
+    if AR2_charmEnabled and AR2_charmMode == "Color" then
+        for _, highlight in pairs(AR2_charmHighlights) do highlight.FillColor = Color3.fromHSV(AR2_charmHue/360,1,1) end
+    end
+end
+
+function AR2_setCharmGray(gray)
+    AR2_charmGray = gray
+    AR2_CFG.misc.charmGray = gray
+    if AR2_charmEnabled and AR2_charmMode == "BlackWhite" then
+        local g = gray/100
+        for _, highlight in pairs(AR2_charmHighlights) do highlight.FillColor = Color3.fromRGB(g*255,g*255,g*255) end
+    end
+end
+
+function AR2_toggleCharmRainbow(enabled)
+    AR2_charmRainbow = enabled
+    AR2_CFG.misc.charmRainbow = enabled
+    if enabled and AR2_charmEnabled then
+        if not AR2_charmRainbowConn then
+            AR2_charmRainbowConn = AR2_RunService.Heartbeat:Connect(function()
+                if not AR2_charmEnabled or not AR2_charmRainbow then
+                    if AR2_charmRainbowConn then AR2_charmRainbowConn:Disconnect() AR2_charmRainbowConn = nil end
+                    return
+                end
+                AR2_charmHue = (AR2_charmHue + 0.5) % 360
+                local col = Color3.fromHSV(AR2_charmHue/360, 1, 1)
+                for _, highlight in pairs(AR2_charmHighlights) do highlight.FillColor = col end
+            end)
+        end
+    else
+        if AR2_charmRainbowConn then AR2_charmRainbowConn:Disconnect() AR2_charmRainbowConn = nil end
+    end
+end
+
+-- =============================================
+-- PERSONAL APPEARANCE
+-- =============================================
+local personalCharOriginal = {}
+local personalGunOriginal = {}
+local personalCharRainbowConn = nil
+local personalGunRainbowConn = nil
+local personalGunLoopConn = nil
+
+function AR2_setPersonalCharacter(enabled, mode, hue, gray, materialStr, rainbow)
+    AR2_CFG.misc.personalCharOn = enabled
+    if mode then AR2_CFG.misc.personalCharMode = mode end
+    if hue then AR2_CFG.misc.personalCharHue = hue end
+    if gray then AR2_CFG.misc.personalCharGray = gray end
+    if materialStr then AR2_CFG.misc.personalCharMaterial = materialStr end
+    if rainbow ~= nil then AR2_CFG.misc.personalCharRainbow = rainbow end
+
+    if not enabled then
+        if personalCharRainbowConn then personalCharRainbowConn:Disconnect() personalCharRainbowConn = nil end
+        for part, orig in pairs(personalCharOriginal) do
+            if part.Parent then part.Color = orig.Color part.Material = orig.Material part.Transparency = orig.Transparency end
+        end
+        table.clear(personalCharOriginal)
+        return
+    end
+
+    local char = AR2_LocalPlayer.Character
+    if not char then return end
+    task.wait(0.5)
+    local material = Enum.Material[AR2_CFG.misc.personalCharMaterial] or Enum.Material.ForceField
+    local targetParts = {
+        "Head", "UpperTorso", "LowerTorso",
+        "LeftUpperArm", "LeftLowerArm", "LeftHand",
+        "RightUpperArm", "RightLowerArm", "RightHand",
+        "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+        "RightUpperLeg", "RightLowerLeg", "RightFoot"
+    }
+    local function getColor()
+        if AR2_CFG.misc.personalCharMode == "BlackWhite" then
+            local g = AR2_CFG.misc.personalCharGray / 100
+            return Color3.fromRGB(g*255, g*255, g*255)
+        else
+            return Color3.fromHSV(AR2_CFG.misc.personalCharHue/360, 1, 1)
+        end
+    end
+
+    for _, name in ipairs(targetParts) do
+        local part = char:FindFirstChild(name)
+        if part and part:IsA("BasePart") then
+            if not personalCharOriginal[part] then
+                personalCharOriginal[part] = { Color = part.Color, Material = part.Material, Transparency = part.Transparency }
+            end
+            part.Material = material
+            if material == Enum.Material.ForceField then part.Transparency = 0.5 else part.Transparency = 0 end
+            part.Color = getColor()
+        end
+    end
+
+    if AR2_CFG.misc.personalCharRainbow then
+        if personalCharRainbowConn then personalCharRainbowConn:Disconnect() end
+        personalCharRainbowConn = AR2_RunService.Heartbeat:Connect(function()
+            local hue = (tick() * 100) % 360
+            local color = Color3.fromHSV(hue/360, 1, 1)
+            for _, name in ipairs(targetParts) do
+                local part = char:FindFirstChild(name)
+                if part and part:IsA("BasePart") then part.Color = color end
+            end
+        end)
+    else
+        if personalCharRainbowConn then personalCharRainbowConn:Disconnect() personalCharRainbowConn = nil end
+    end
+end
+
+function AR2_setPersonalGun(enabled, mode, hue, gray, materialStr, rainbow)
+    AR2_CFG.misc.personalGunOn = enabled
+    if mode then AR2_CFG.misc.personalGunMode = mode end
+    if hue then AR2_CFG.misc.personalGunHue = hue end
+    if gray then AR2_CFG.misc.personalGunGray = gray end
+    if materialStr then AR2_CFG.misc.personalGunMaterial = materialStr end
+    if rainbow ~= nil then AR2_CFG.misc.personalGunRainbow = rainbow end
+
+    if not enabled then
+        if personalGunRainbowConn then personalGunRainbowConn:Disconnect() personalGunRainbowConn = nil end
+        if personalGunLoopConn then personalGunLoopConn:Disconnect() personalGunLoopConn = nil end
+        for part, orig in pairs(personalGunOriginal) do
+            if part.Parent then part.Color = orig.Color part.Material = orig.Material part.Transparency = orig.Transparency end
+        end
+        table.clear(personalGunOriginal)
+        return
+    end
+
+    if personalGunLoopConn then personalGunLoopConn:Disconnect() end
+    personalGunLoopConn = AR2_RunService.Heartbeat:Connect(function()
+        local gun = AR2_findGunModel()
+        if not gun then return end
+        local material = Enum.Material[AR2_CFG.misc.personalGunMaterial] or Enum.Material.Neon
+        local function getColor()
+            if AR2_CFG.misc.personalGunMode == "BlackWhite" then
+                local g = AR2_CFG.misc.personalGunGray / 100
+                return Color3.fromRGB(g*255, g*255, g*255)
+            else
+                return Color3.fromHSV(AR2_CFG.misc.personalGunHue/360, 1, 1)
+            end
+        end
+        local function applyColor(color)
+            for _, descendant in ipairs(gun:GetDescendants()) do
+                if descendant:IsA("BasePart") then
+                    local n = descendant.Name:lower()
+                    local isSight = n:find("scope") or n:find("sight") or n:find("lens")
+                        or n:find("glass") or n:find("reticle") or n:find("window")
+                        or n:find("dot") or n:find("optic")
+                    local origT = personalGunOriginal[descendant] and personalGunOriginal[descendant].Transparency or descendant.Transparency
+                    if not isSight and origT < 0.8 then
+                        if not personalGunOriginal[descendant] then
+                            personalGunOriginal[descendant] = { Color = descendant.Color, Material = descendant.Material, Transparency = descendant.Transparency }
+                        end
+                        descendant.Material = material
+                        descendant.Transparency = material == Enum.Material.ForceField and 0.5 or 0
+                        descendant.Color = color
+                    end
+                end
+            end
+        end
+        if AR2_CFG.misc.personalGunRainbow then
+            local hue = (tick() * 100) % 360
+            applyColor(Color3.fromHSV(hue/360, 1, 1))
+        else
+            applyColor(getColor())
+        end
+    end)
+end
+
+function AR2_findGunModel()
+    local char = AR2_LocalPlayer.Character
+    if not char then return nil end
+    local equipped = char:FindFirstChild("Equipped")
+    if equipped then
+        for _, child in ipairs(equipped:GetChildren()) do
+            if child:IsA("Model") or child:IsA("Tool") then return child end
+        end
+    end
+    for _, child in ipairs(char:GetChildren()) do
+        if child:IsA("Tool") then return child end
+    end
+    return nil
+end
+
+-- =============================================
+-- MISC FUNCTIONS (Auto Reload, Instant Interact, Container Persistence, Player Jesus, Self Backtrack, Jump Circle, Remove Shadows, Clouds, Color Correction, Cosmetics)
+-- =============================================
+
+-- Auto Reload
+local AR2_autoReloadConn = nil
+function AR2_setAutoReload(enabled)
+    AR2_CFG.weapon.autoReload = enabled
+    if AR2_autoReloadConn then AR2_autoReloadConn:Disconnect() AR2_autoReloadConn = nil end
+    if not enabled then return end
+    AR2_autoReloadConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_CFG.weapon.autoReload then return end
+        local inner = AR2_getEquippedInner()
+        if inner and inner.Attachments and inner.Attachments.Ammo then
+            local ammo = inner.Attachments.Ammo.__item
+            if ammo and ammo.WorkingAmount <= 0 then
+                pcall(function() inner:OnReload() end)
+            end
+        end
+    end)
+end
+
+-- Instant Interact
+local AR2_instantInteractConn = nil
+function AR2_setInstantInteract(enabled)
+    AR2_CFG.misc.instantInteract = enabled
+    if AR2_instantInteractConn then AR2_instantInteractConn:Disconnect() AR2_instantInteractConn = nil end
+    if not enabled then return end
+    local player = AR2_LocalPlayer
+    local mouse = player:GetMouse()
+    if not mouse then return end
+    AR2_instantInteractConn = mouse.Button1Down:Connect(function()
+        if not AR2_CFG.misc.instantInteract then return end
+        local target = mouse.Target
+        if target then
+            local parent = target.Parent
+            while parent and not parent:IsA("Model") do parent = parent.Parent end
+            if parent and parent:FindFirstChildWhichIsA("ProximityPrompt") then
+                local prompt = parent:FindFirstChildWhichIsA("ProximityPrompt")
+                if prompt and prompt.Enabled then prompt:InputHoldBegin() end
+            end
+        end
+    end)
+end
+
+-- Container Persistence (original)
+local AR2_containerPersistenceConn = nil
+function AR2_setContainerPersistence(enabled)
+    AR2_CFG.misc.containerPersistence = enabled
+    if AR2_containerPersistenceConn then AR2_containerPersistenceConn:Disconnect() AR2_containerPersistenceConn = nil end
+    if not enabled then return end
+    AR2_containerPersistenceConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_CFG.misc.containerPersistence then return end
+        for _, model in ipairs(AR2_CollectionService:GetTagged("Loot Container")) do
+            local gui = model:FindFirstChild("SurfaceGui") or model:FindFirstChildWhichIsA("SurfaceGui")
+            if gui and not gui.Enabled then gui.Enabled = true end
+        end
+    end)
+end
+
+-- Player Jesus (original)
+local AR2_playerJesusConn = nil
+function AR2_setPlayerJesus(enabled)
+    AR2_CFG.misc.playerJesus = enabled
+    if AR2_playerJesusConn then AR2_playerJesusConn:Disconnect() AR2_playerJesusConn = nil end
+    if not enabled then return end
+    AR2_playerJesusConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_CFG.misc.playerJesus then return end
+        local char = AR2_LocalPlayer.Character
+        local humanoid = char and char:FindFirstChildWhichIsA("Humanoid")
+        if humanoid then
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+            if humanoid:GetState() == Enum.HumanoidStateType.FallingDown or humanoid:GetState() == Enum.HumanoidStateType.Ragdoll then
+                humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+            end
+        end
+    end)
+end
+
+-- Self Backtrack
+local AR2_backtrackClone = nil
+local AR2_backtrackConn = nil
+function AR2_setSelfBacktrack(enabled)
+    AR2_CFG.misc.selfBacktrack.enabled = enabled
+    if AR2_backtrackConn then AR2_backtrackConn:Disconnect() AR2_backtrackConn = nil end
+    if AR2_backtrackClone then AR2_backtrackClone:Destroy() AR2_backtrackClone = nil end
+    if not enabled then return end
+    AR2_backtrackConn = AR2_RunService.Heartbeat:Connect(function()
+        local char = AR2_LocalPlayer.Character
+        if not char then return end
+        if not AR2_backtrackClone or not AR2_backtrackClone.Parent then
+            AR2_backtrackClone = char:Clone()
+            for _, child in ipairs(AR2_backtrackClone:GetDescendants()) do
+                if child:IsA("BasePart") then
+                    child.Anchored = true
+                    child.CanCollide = false
+                    child.Transparency = AR2_CFG.misc.selfBacktrack.transparency
+                    child.Color = AR2_CFG.misc.selfBacktrack.color
+                    child.Material = AR2_CFG.misc.selfBacktrack.material
+                end
+                if child:IsA("Humanoid") then child:Destroy() end
+                if child:IsA("Animator") then child:Destroy() end
+            end
+            AR2_backtrackClone.Parent = workspace
+        end
+        if AR2_backtrackClone then
+            AR2_backtrackClone:PivotTo(char:GetPivot())
+        end
+    end)
+end
+
+-- Jump Circle
+local AR2_jumpCirclePart = nil
+local AR2_jumpCircleConn = nil
+function AR2_setJumpCircle(enabled)
+    AR2_CFG.misc.jumpCircle.enabled = enabled
+    if AR2_jumpCircleConn then AR2_jumpCircleConn:Disconnect() AR2_jumpCircleConn = nil end
+    if AR2_jumpCirclePart then AR2_jumpCirclePart:Destroy() AR2_jumpCirclePart = nil end
+    if not enabled then return end
+    AR2_jumpCircleConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_CFG.misc.jumpCircle.enabled then return end
+        local char = AR2_LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+        if math.abs(root.AssemblyLinearVelocity.Y) > 1 and root.Position.Y > 0 then
+            if not AR2_jumpCirclePart or not AR2_jumpCirclePart.Parent then
+                AR2_jumpCirclePart = Instance.new("Part")
+                AR2_jumpCirclePart.Shape = Enum.PartType.Cylinder
+                AR2_jumpCirclePart.Size = Vector3.new(1, 0.2, 1)
+                AR2_jumpCirclePart.Anchored = true
+                AR2_jumpCirclePart.CanCollide = false
+                AR2_jumpCirclePart.Transparency = 0.5
+                AR2_jumpCirclePart.Color = AR2_CFG.misc.jumpCircle.color
+                AR2_jumpCirclePart.Material = Enum.Material.Neon
+                AR2_jumpCirclePart.Parent = workspace
+            end
+            local progress = math.clamp((os.clock() % AR2_CFG.misc.jumpCircle.duration) / AR2_CFG.misc.jumpCircle.duration, 0, 1)
+            local radius = AR2_CFG.misc.jumpCircle.startRadius + (AR2_CFG.misc.jumpCircle.endRadius - AR2_CFG.misc.jumpCircle.startRadius) * progress
+            AR2_jumpCirclePart.Size = Vector3.new(radius*2, 0.2, radius*2)
+            AR2_jumpCirclePart.Position = Vector3.new(root.Position.X, root.Position.Y - 1, root.Position.Z)
+        else
+            if AR2_jumpCirclePart then AR2_jumpCirclePart:Destroy() AR2_jumpCirclePart = nil end
+        end
+    end)
+end
+
+-- Remove Shadows
+local AR2_removeShadowsConn = nil
+function AR2_setRemoveShadows(enabled)
+    AR2_CFG.misc.removeShadows = enabled
+    if enabled then
+        if not AR2_removeShadowsConn then
+            AR2_removeShadowsConn = AR2_RunService.Heartbeat:Connect(function()
+                if not AR2_CFG.misc.removeShadows then return end
+                for _, obj in ipairs(AR2_Workspace:GetDescendants()) do
+                    if obj:IsA("BasePart") and obj.CastShadow then obj.CastShadow = false end
+                end
+            end)
+        end
+    else
+        if AR2_removeShadowsConn then AR2_removeShadowsConn:Disconnect() AR2_removeShadowsConn = nil end
+    end
+end
+
+-- Clouds (original AR2_setClouds)
+function AR2_setClouds(enabled, modify, color, cover, density)
+    AR2_CFG.visuals.cloudsEnabled = enabled
+    AR2_CFG.visuals.modifyClouds = modify
+    if color then AR2_CFG.visuals.cloudsColor = color end
+    if cover then AR2_CFG.visuals.cloudsCover = cover end
+    if density then AR2_CFG.visuals.cloudsDensity = density end
+    local terrain = workspace:FindFirstChildWhichIsA("Terrain")
+    if not terrain then return end
+    local clouds = terrain:FindFirstChildWhichIsA("Clouds")
+    if enabled then
+        if not clouds then clouds = Instance.new("Clouds") clouds.Parent = terrain end
+        if modify and clouds then
+            clouds.Color = AR2_CFG.visuals.cloudsColor or Color3.fromRGB(255,255,255)
+            clouds.Cover = AR2_CFG.visuals.cloudsCover or 0.5
+            clouds.Density = AR2_CFG.visuals.cloudsDensity or 0.5
+        end
+    else
+        if clouds then clouds:Destroy() end
+    end
+end
+
+-- Color Correction (original AR2_setColorCorrection)
+local AR2_ccEffect = nil
+function AR2_setColorCorrection(enabled, saturation, contrast, brightness)
+    AR2_CFG.visuals.colorCorrectionEnabled = enabled
+    if saturation then AR2_CFG.visuals.ccSaturation = saturation end
+    if contrast then AR2_CFG.visuals.ccContrast = contrast end
+    if brightness then AR2_CFG.visuals.ccBrightness = brightness end
+
+    if enabled then
+        if not AR2_ccEffect or not AR2_ccEffect.Parent then
+            AR2_ccEffect = Instance.new("ColorCorrectionEffect")
+            AR2_ccEffect.Parent = AR2_Lighting
+        end
+        AR2_ccEffect.Saturation = AR2_CFG.visuals.ccSaturation
+        AR2_ccEffect.Contrast = AR2_CFG.visuals.ccContrast
+        AR2_ccEffect.Brightness = AR2_CFG.visuals.ccBrightness
+    else
+        if AR2_ccEffect then AR2_ccEffect:Destroy() AR2_ccEffect = nil end
+    end
+end
+
+-- Cosmetics Unlocker (original)
+AR2_cosEquipped = {}
+AR2_cosEnabled = false
+AR2_cosSlot = 0
+AR2_cosHooked = {}
+AR2_cosWatchConn = nil
+
+local function AR2_cosFindCharVM(root)
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("ViewportFrame") then
+            for _, wm in ipairs(d:GetChildren()) do
+                if wm:IsA("WorldModel") then
+                    for _, vm in ipairs(wm:GetChildren()) do
+                        if vm:IsA("Model") and (vm:FindFirstChild("HumanoidRootPart") or vm:FindFirstChild("UpperTorso") or vm:FindFirstChild("Torso")) then
+                            return vm
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function AR2_cosFindNear(el)
+    local node = el
+    for _=1,6 do
+        if not node then break end
+        local vm = AR2_cosFindCharVM(node)
+        if vm then return vm end
+        node = node.Parent
+    end
+end
+
+local function AR2_cosNearestBody(vm, pos)
+    local best, bestD = nil, math.huge
+    local bodyParts = {HumanoidRootPart=true, Head=true, UpperTorso=true, LowerTorso=true, Torso=true, ["Left Arm"]=true, ["Right Arm"]=true, ["Left Leg"]=true, ["Right Leg"]=true}
+    for _, p in ipairs(vm:GetDescendants()) do
+        if p:IsA("BasePart") and bodyParts[p.Name] then
+            local d = (p.Position - pos).Magnitude
+            if d < bestD then best = p bestD = d end
+        end
+    end
+    return best
+end
+
+local function AR2_cosClonePart(p, anchor, nbCF)
+    local ok, clone = pcall(function() return p:Clone() end)
+    if not ok or not clone then return nil end
+    for _, c in ipairs(clone:GetChildren()) do
+        if c:IsA("Motor6D") or c:IsA("Weld") or c:IsA("WeldConstraint") or c:IsA("Script") or c:IsA("LocalScript") or c:IsA("BodyVelocity") or c:IsA("LinearVelocity") or c:IsA("Humanoid") or c:IsA("AnimationController") then c:Destroy() end
+    end
+    clone.Anchored = true clone.CanCollide = false clone.CanTouch = false clone.CanQuery = false clone.CastShadow = false clone.Massless = true
+    clone.Parent = workspace.CurrentCamera
+    pcall(function() AR2_CollectionService:AddTag(clone, "Bullets Penetrate") end)
+    return clone, {anchor=anchor, localCF=nbCF:Inverse() * p.CFrame}
+end
+
+local function AR2_cosBuild(vm)
+    local parts = {} local count = 0
+    local bodyParts = {HumanoidRootPart=true, Head=true, UpperTorso=true, LowerTorso=true, Torso=true, ["Left Arm"]=true, ["Right Arm"]=true, ["Left Leg"]=true, ["Right Leg"]=true}
+    for _, p in ipairs(vm:GetDescendants()) do
+        if p:IsA("BasePart") and not bodyParts[p.Name] then
+            local nb = AR2_cosNearestBody(vm, p.Position)
+            local clone, data = AR2_cosClonePart(p, nb and nb.Name or "HumanoidRootPart", nb and nb.CFrame or CFrame.new())
+            if clone then parts[clone] = data count = count + 1 end
+        end
+    end
+    if count == 0 then
+        for _, p in ipairs(vm:GetDescendants()) do
+            if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" then
+                local nb = AR2_cosNearestBody(vm, p.Position)
+                local clone, data = AR2_cosClonePart(p, nb and nb.Name or "HumanoidRootPart", nb and nb.CFrame or CFrame.new())
+                if clone then
+                    if bodyParts[p.Name] then clone.Transparency = 1 end
+                    parts[clone] = data count = count + 1
+                end
+            end
+        end
+    end
+    return parts, count
+end
+
+function AR2_cosAttach(vm)
+    local char = AR2_LocalPlayer.Character
+    if not char then return end
+    local parts, count = AR2_cosBuild(vm)
+    if count == 0 then return end
+    AR2_cosSlot = AR2_cosSlot + 1
+    local slot = AR2_cosSlot
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    for part, data in pairs(parts) do
+        local anchor = char:FindFirstChild(data.anchor) or hrp
+        if anchor then part.CFrame = anchor.CFrame * data.localCF end
+    end
+    AR2_cosEquipped[slot] = parts
+end
+
+function AR2_cosRemoveAll()
+    for slot, ptbl in pairs(AR2_cosEquipped) do
+        for part in pairs(ptbl) do
+            pcall(function() if part.Parent then part:Destroy() end end)
+        end
+        AR2_cosEquipped[slot] = nil
+    end
+end
+
+AR2_RunService.RenderStepped:Connect(function()
+    if not AR2_cosEnabled then return end
+    local char = AR2_LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    for slot, ptbl in pairs(AR2_cosEquipped) do
+        local empty = true
+        for part, data in pairs(ptbl) do
+            if part.Parent then
+                local anchor = char:FindFirstChild(data.anchor) or hrp
+                part.CFrame = anchor.CFrame * data.localCF
+                empty = false
+            else ptbl[part] = nil end
+        end
+        if empty then AR2_cosEquipped[slot] = nil end
+    end
+end)
+
+local function AR2_cosHookBtn(btn)
+    if AR2_cosHooked[btn] then return end
+    AR2_cosHooked[btn] = btn.MouseButton1Click:Connect(function()
+        if not AR2_cosEnabled then return end
+        task.wait(0.15)
+        local vm = AR2_cosFindNear(btn)
+        if vm then AR2_cosAttach(vm) end
+    end)
+end
+
+local function AR2_cosScan()
+    local gui = AR2_LocalPlayer:FindFirstChild("PlayerGui")
+    if not gui then return end
+    for _, d in ipairs(gui:GetDescendants()) do
+        if d:IsA("ImageButton") or d:IsA("TextButton") then pcall(AR2_cosHookBtn, d) end
+    end
+end
+
+function AR2_cosSetEnabled(on)
+    AR2_cosEnabled = on
+    if on then
+        AR2_cosScan()
+        local gui = AR2_LocalPlayer:FindFirstChild("PlayerGui")
+        if gui and not AR2_cosWatchConn then
+            AR2_cosWatchConn = gui.DescendantAdded:Connect(function(d)
+                if not AR2_cosEnabled then return end
+                if d:IsA("ImageButton") or d:IsA("TextButton") then
+                    task.wait(0.1) pcall(AR2_cosHookBtn, d)
+                end
+            end)
+        end
+    else
+        if AR2_cosWatchConn then AR2_cosWatchConn:Disconnect() AR2_cosWatchConn = nil end
+        for btn, conn in pairs(AR2_cosHooked) do pcall(function() conn:Disconnect() end) end
+        AR2_cosHooked = {}
+        AR2_cosRemoveAll()
+    end
+end
+
+-- =============================================
+-- CUSTOM CROSSHAIR
+-- =============================================
+local AR2_crosshairDrawings = {}
+local AR2_crosshairConn = nil
+
+local function AR2_destroyCrosshair()
+    for _, d in ipairs(AR2_crosshairDrawings) do pcall(function() d:Remove() end) end
+    AR2_crosshairDrawings = {}
+end
+
+local function AR2_buildCrosshair()
+    AR2_destroyCrosshair()
+    if not AR2_CFG.crosshair.enabled then return end
+    if not AR2_hasDrawing then return end
+    local cfg = AR2_CFG.crosshair
+    local color = Color3.fromHSV(cfg.hue/360, 1, 1)
+    local s = cfg.size; local g = cfg.gap; local t = cfg.thickness
+
+    if cfg.shape == "Cross" then
+        for i = 1, 4 do
+            local line = Drawing.new("Line") line.Thickness = t line.Color = color line.Transparency = 1 line.Visible = true
+            AR2_crosshairDrawings[i] = line
+        end
+    elseif cfg.shape == "Dot" then
+        local circle = Drawing.new("Circle") circle.Radius = t + 1 circle.Color = color circle.Filled = true circle.Transparency = 1 circle.Visible = true
+        AR2_crosshairDrawings[1] = circle
+    elseif cfg.shape == "Circle" then
+        local circle = Drawing.new("Circle") circle.Radius = s circle.Color = color circle.Filled = false circle.Thickness = t circle.Transparency = 1 circle.Visible = true
+        AR2_crosshairDrawings[1] = circle
+    elseif cfg.shape == "T" then
+        for i = 1, 3 do
+            local line = Drawing.new("Line") line.Thickness = t line.Color = color line.Transparency = 1 line.Visible = true
+            AR2_crosshairDrawings[i] = line
+        end
+    elseif cfg.shape == "Square" then
+        local sq = Drawing.new("Square") sq.Size = Vector2.new(s * 2, s * 2) sq.Color = color sq.Filled = false sq.Thickness = t sq.Transparency = 1 sq.Visible = true
+        AR2_crosshairDrawings[1] = sq
+    end
+end
+
+local function AR2_updateCrosshairPositions(center)
+    local cfg = AR2_CFG.crosshair
+    local color = cfg.rainbow and Color3.fromHSV((tick() * 80 % 360) / 360, 1, 1) or Color3.fromHSV(cfg.hue / 360, 1, 1)
+    local s = cfg.size; local g = cfg.gap; local t = cfg.thickness
+
+    if cfg.shape == "Cross" and #AR2_crosshairDrawings == 4 then
+        AR2_crosshairDrawings[1].From = center + Vector2.new(0, -(g + s)) AR2_crosshairDrawings[1].To = center + Vector2.new(0, -g)
+        AR2_crosshairDrawings[2].From = center + Vector2.new(0, g) AR2_crosshairDrawings[2].To = center + Vector2.new(0, g + s)
+        AR2_crosshairDrawings[3].From = center + Vector2.new(-(g + s), 0) AR2_crosshairDrawings[3].To = center + Vector2.new(-g, 0)
+        AR2_crosshairDrawings[4].From = center + Vector2.new(g, 0) AR2_crosshairDrawings[4].To = center + Vector2.new(g + s, 0)
+        for _, d in ipairs(AR2_crosshairDrawings) do d.Color = color d.Thickness = t end
+    elseif cfg.shape == "Dot" and #AR2_crosshairDrawings == 1 then
+        AR2_crosshairDrawings[1].Position = center AR2_crosshairDrawings[1].Radius = t + 1 AR2_crosshairDrawings[1].Color = color
+    elseif cfg.shape == "Circle" and #AR2_crosshairDrawings == 1 then
+        AR2_crosshairDrawings[1].Position = center AR2_crosshairDrawings[1].Radius = s AR2_crosshairDrawings[1].Color = color AR2_crosshairDrawings[1].Thickness = t
+    elseif cfg.shape == "T" and #AR2_crosshairDrawings == 3 then
+        AR2_crosshairDrawings[1].From = center + Vector2.new(0, -(g + s)) AR2_crosshairDrawings[1].To = center + Vector2.new(0, -g)
+        AR2_crosshairDrawings[2].From = center + Vector2.new(-(g + s), 0) AR2_crosshairDrawings[2].To = center + Vector2.new(-g, 0)
+        AR2_crosshairDrawings[3].From = center + Vector2.new(g, 0) AR2_crosshairDrawings[3].To = center + Vector2.new(g + s, 0)
+        for _, d in ipairs(AR2_crosshairDrawings) do d.Color = color d.Thickness = t end
+    elseif cfg.shape == "Square" and #AR2_crosshairDrawings == 1 then
+        AR2_crosshairDrawings[1].Position = center - Vector2.new(s, s) AR2_crosshairDrawings[1].Size = Vector2.new(s * 2, s * 2)
+        AR2_crosshairDrawings[1].Color = color AR2_crosshairDrawings[1].Thickness = t
+    end
+end
+
+function AR2_toggleCrosshair(enabled)
+    AR2_CFG.crosshair.enabled = enabled
+    if AR2_crosshairConn then AR2_crosshairConn:Disconnect() AR2_crosshairConn = nil end
+    AR2_destroyCrosshair()
+    if not enabled then return end
+    AR2_buildCrosshair()
+    AR2_crosshairConn = AR2_RunService.RenderStepped:Connect(function()
+        if not AR2_CFG.crosshair.enabled then return end
+        local cam = AR2_Camera
+        if not cam then return end
+        local expectedCount = ({Cross=4, Dot=1, Circle=1, T=3, Square=1})[AR2_CFG.crosshair.shape] or 1
+        if #AR2_crosshairDrawings ~= expectedCount then AR2_buildCrosshair() end
+        local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+        AR2_updateCrosshairPositions(center)
+    end)
+end
+
+-- =============================================
+-- KEYBIND SYSTEM
+-- =============================================
+AR2_keybindActions = {}
+
+function AR2_registerKeybind(name, toggleFn)
+    AR2_keybindActions[name] = toggleFn
+end
+
+local function AR2_fireKeybind(keyName)
+    for feature, key in pairs(AR2_CFG.keybinds) do
+        if key ~= "None" and key == keyName then
+            local action = AR2_keybindActions[feature]
+            if action then pcall(action) end
+        end
+    end
+end
+
+AR2_UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    local keyName
+    if input.UserInputType == Enum.UserInputType.MouseButton3 then keyName = "MouseButton3" else keyName = input.KeyCode.Name end
+    AR2_fireKeybind(keyName)
+end)
+
+local function AR2_registerAllKeybinds()
+    AR2_registerKeybind("playerESP", function() AR2_CFG.players.on = not AR2_CFG.players.on AR2_esp.update() end)
+    AR2_registerKeybind("zombieESP", function() AR2_CFG.zombies.on = not AR2_CFG.zombies.on AR2_esp.update() end)
+    AR2_registerKeybind("lootESP", function() AR2_CFG.loot.on = not AR2_CFG.loot.on AR2_esp.update() end)
+    AR2_registerKeybind("silentAim", function() AR2_CFG.magicAim.on = not AR2_CFG.magicAim.on AR2_magicUpdate() end)
+    AR2_registerKeybind("rageBot", function() AR2_rageBotSetEnabled(not AR2_CFG.rageBot.on) end)
+    AR2_registerKeybind("hbe", function() AR2_hbeSetEnabled(not AR2_CFG.weapon.hbeOn) end)
+    AR2_registerKeybind("speedHack", function() AR2_CFG.speed.on = not AR2_CFG.speed.on if AR2_CFG.speed.on then AR2_speed.start() else AR2_speed.stop() end end)
+    AR2_registerKeybind("infJump", function() AR2_CFG.misc.infJump = not AR2_CFG.misc.infJump if AR2_CFG.misc.infJump then AR2_startInfJump() else AR2_stopInfJump() end end)
+    AR2_registerKeybind("noclip", function() AR2_toggleNoclip(not AR2_CFG.misc.noclip) end)
+    AR2_registerKeybind("freezeZombies", function() AR2_CFG.misc.freeze = not AR2_CFG.misc.freeze if AR2_CFG.misc.freeze then AR2_freeze.start() else AR2_freeze.stop() end end)
+    AR2_registerKeybind("fullbright", function() AR2_CFG.visuals.fullbright = not AR2_CFG.visuals.fullbright AR2_visuals.apply() end)
+    AR2_registerKeybind("noSpread", function() AR2_CFG.weapon.noSpread = not AR2_CFG.weapon.noSpread end)
+    AR2_registerKeybind("noBulletDrop", function() AR2_CFG.weapon.noBulletDrop = not AR2_CFG.weapon.noBulletDrop end)
+    AR2_registerKeybind("instantReload", function() setInstantReloadEnabled(not AR2_instantReloadEnabled) end)
+    AR2_registerKeybind("allFireModes", function() AR2_applyAllFireModes(not AR2_CFG.weapon.allFireModes) end)
+    AR2_registerKeybind("wallbang", function() AR2_CFG.weapon.wallbang = not AR2_CFG.weapon.wallbang if AR2_CFG.weapon.wallbang then startWallbangTagging() else stopWallbangTagging() end end)
+    AR2_registerKeybind("protection", function() AR2_CFG.rageBot.protection = not AR2_CFG.rageBot.protection end)
+    AR2_registerKeybind("crosshair", function() AR2_toggleCrosshair(not AR2_CFG.crosshair.enabled) end)
+    AR2_registerKeybind("tracers", function() AR2_CFG.misc.tracers = not AR2_CFG.misc.tracers AR2_tracersUpdate() end)
+end
+
+-- =============================================
+-- UI
+-- =============================================
+AR2_UI_ELEMENTS = {}
+
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+if WindUI then
+    pcall(function()
+        if WindUI.Themes then
+            local t = WindUI.Themes["Dark"] or WindUI.Themes.Dark
+            if t then t.Accent = Color3.fromRGB(210, 80, 255) end
+        end
+    end)
+
+    local Window = WindUI:CreateWindow({
+        Title = "7177 Scripts", Icon = "sword", Author = "Integrated",
+        Folder = "ApocalypseRising2_7177", Size = UDim2.fromOffset(800, 780),
+        MinSize = Vector2.new(600, 450), MaxSize = Vector2.new(1000, 800),
+        ToggleKey = Enum.KeyCode.P, Theme = "Violet",
+        Accent = Color3.fromRGB(210, 80, 255), Resizable = true,
+        SideBarWidth = 180, Transparent = true,
+    })
+    pcall(function() WindUI:SetAccentColor(Color3.fromRGB(210, 80, 255)) end)
+    pcall(function() WindUI.AccentColor = Color3.fromRGB(210, 80, 255) end)
+
+    local function getPlayerNames()
+        local names = {"None"}
+        for _, p in ipairs(AR2_Players:GetPlayers()) do if p ~= AR2_LocalPlayer then table.insert(names, p.Name) end end
+        return names
+    end
+
+    local function storeElement(elem) table.insert(AR2_UI_ELEMENTS, elem) end
+
+    local function addToggle(tab, label, cfgTable, cfgKey, callback)
+        local element = tab:Toggle({
+            Title = label, Value = cfgTable[cfgKey],
+            Callback = function(v) cfgTable[cfgKey] = v callback(v) AR2_markDirty() end,
+        })
+        storeElement({ getter = function() return cfgTable[cfgKey] end, setter = function(val) element:Set(val) end })
+        return element
+    end
+
+    local function addSlider(tab, label, cfgTable, cfgKey, min, max, stepOrOnChange, onChange)
+        local step = 1
+        local callback = onChange
+        if type(stepOrOnChange) == "function" then callback = stepOrOnChange
+        elseif type(stepOrOnChange) == "number" then step = stepOrOnChange end
+        local element = tab:Slider({
+            Title = label, Step = step,
+            Value = { Min = math.floor(min), Max = math.floor(max), Default = math.floor(cfgTable[cfgKey] or min) },
+            Callback = function(value)
+                local v = tonumber(value)
+                if v then cfgTable[cfgKey] = math.floor(v) AR2_markDirty() if callback then callback(math.floor(v)) end end
+            end,
+        })
+        storeElement({ getter = function() return cfgTable[cfgKey] end, setter = function(val) element:Set(val) end })
+        return element
+    end
+
+    local function addDropdown(tab, label, options, cfgTable, cfgKey, callback)
+        local element = tab:Dropdown({
+            Title = label, Values = options, Value = cfgTable[cfgKey],
+            Callback = function(v) cfgTable[cfgKey] = v callback(v) AR2_markDirty() end,
+        })
+        storeElement({ getter = function() return cfgTable[cfgKey] end, setter = function(val) element:Set(val) end })
+        return element
+    end
+
+    -- ESP Tab
+    local espTab = Window:Tab({ Title = "ESP", Icon = "eye" })
+    local playerSection = espTab:Section({ Title = "Player ESP", Box = false })
+    addToggle(playerSection, "Enabled", AR2_CFG.players, "on", function(v) AR2_esp.update() end)
+    addToggle(playerSection, "Box", AR2_CFG.players, "box")
+    addToggle(playerSection, "Name", AR2_CFG.players, "name")
+    addToggle(playerSection, "Tracer", AR2_CFG.players, "tracer")
+    addToggle(playerSection, "Chams", AR2_CFG.players, "chams")
+    addToggle(playerSection, "Weapon", AR2_CFG.players, "weapon")
+    addToggle(playerSection, "Distance", AR2_CFG.players, "dist")
+    addSlider(playerSection, "Max Distance", AR2_CFG.players, "maxDist", 100, 10000)
+
+    local corpseSection = espTab:Section({ Title = "Corpse ESP", Box = false })
+    addToggle(corpseSection, "Enabled", AR2_CFG.corpses, "on", function(v) AR2_esp.update() end)
+    addSlider(corpseSection, "Max Distance", AR2_CFG.corpses, "maxDist", 100, 5000)
+
+    local lootSection = espTab:Section({ Title = "Loot ESP", Box = false })
+    addToggle(lootSection, "Enabled", AR2_CFG.loot, "on", function(v) AR2_esp.update() end)
+    addSlider(lootSection, "Max Distance", AR2_CFG.loot, "maxDist", 100, 5000)
+    addSlider(lootSection, "Min Rank", AR2_CFG.loot, "minRank", 0, 5)
+
+    local zombieSection = espTab:Section({ Title = "Zombie ESP", Box = false })
+    addToggle(zombieSection, "Enabled", AR2_CFG.zombies, "on", function(v) AR2_esp.update() end)
+    addSlider(zombieSection, "Max Distance", AR2_CFG.zombies, "maxDist", 100, 3000)
+
+    local vehicleSection = espTab:Section({ Title = "Vehicle ESP", Box = false })
+    addToggle(vehicleSection, "Enabled", AR2_CFG.vehicles, "on", function(v) AR2_esp.update() end)
+    addSlider(vehicleSection, "Max Distance", AR2_CFG.vehicles, "maxDist", 100, 5000)
+
+    -- Combat Tab
+    local combatTab = Window:Tab({ Title = "Combat", Icon = "crosshair" })
+    local aimbotSection = combatTab:Section({ Title = "Aimbot", Box = false })
+    addToggle(aimbotSection, "Enabled", AR2_CFG.aim, "on", function(v) if v then AR2_aim.start() else AR2_aim.stop() end end)
+    addDropdown(aimbotSection, "Target Part", AR2_AIM_PARTS, AR2_CFG.aim, "part")
+    addSlider(aimbotSection, "FOV", AR2_CFG.aim, "fov", 20, 500)
+    addSlider(aimbotSection, "Smoothing", AR2_CFG.aim, "smooth", 3, 60)
+    addToggle(aimbotSection, "Wall Check", AR2_CFG.aim, "wallCheck")
+    addToggle(aimbotSection, "Show FOV", AR2_CFG.aim, "showFov")
+
+    local silentAimSection = combatTab:Section({ Title = "Silent Aim", Box = false })
+    addToggle(silentAimSection, "Enabled", AR2_CFG.magicAim, "on", function(v) AR2_magicUpdate() end)
+    addSlider(silentAimSection, "FOV", AR2_CFG.magicAim, "fov", 20, 800)
+    addSlider(silentAimSection, "Max Bend", AR2_CFG.magicAim, "maxBend", 1, 180)
+    addSlider(silentAimSection, "Max Distance", AR2_CFG.magicAim, "maxDist", 100, 10000)
+    addDropdown(silentAimSection, "Target Part", AR2_MAGIC_AIM_PARTS, AR2_CFG.magicAim, "part")
+    addToggle(silentAimSection, "Players", AR2_CFG.magicAim, "players")
+    addToggle(silentAimSection, "Zombies", AR2_CFG.magicAim, "zombies")
+    addToggle(silentAimSection, "Skip Teammates", AR2_CFG.magicAim, "noTeammate", function(v) AR2_CFG.magicAim.noTeammate = v end)
+    addToggle(silentAimSection, "Visible Only", AR2_CFG.magicAim, "visCheck")
+    addToggle(silentAimSection, "Show FOV Circle", AR2_CFG.magicAim, "showFov", function(v) AR2_magicUpdate() end)
+    addToggle(silentAimSection, "Show Lock Line", AR2_CFG.magicAim, "showLockLine", function(v) AR2_magicUpdate() end)
+    addToggle(silentAimSection, "Auto Bullet Speed", AR2_CFG.magicAim, "autoSpeed")
+    addToggle(silentAimSection, "Compensate Drop", AR2_CFG.magicAim, "dropComp")
+    addSlider(silentAimSection, "Manual Bullet Speed", AR2_CFG.magicAim, "bulletSpeed", 0, 3000)
+    addToggle(silentAimSection, "Kill Spread", AR2_CFG.magicAim, "killSpread")
+    addToggle(silentAimSection, "Origin Shift (Magic Bullet)", AR2_CFG.magicAim, "originShift")
+    addSlider(silentAimSection, "Search Radius", AR2_CFG.magicBullet, "searchRadius", 1, 12)
+    addSlider(silentAimSection, "Forward Nudge", AR2_CFG.magicBullet, "forwardNudge", 0, 5)
+    addSlider(silentAimSection, "Redirect Chance %", AR2_CFG.magicAim, "redirectChance", 0, 100)
+
+    -- Worldwide toggle
+    silentAimSection:Button({ Title = "Worldwide Silent Aim (Toggle)", Callback = function()
+        AR2_toggleWorldwide(not AR2_CFG.magicAim.ignoreFov)
+    end })
+
+    -- Rage Bot section
+    local rageBotSection = combatTab:Section({ Title = "Rage Bot", Box = false })
+    addToggle(rageBotSection, "Enabled", AR2_CFG.rageBot, "on", function(v) AR2_rageBotSetEnabled(v) end)
+    addSlider(rageBotSection, "Max Distance", AR2_CFG.rageBot, "maxDist", 50, 2000, function(v) AR2_CFG.rageBot.maxDist = v end)
+    addToggle(rageBotSection, "ADS Only", AR2_CFG.rageBot, "requireADS", function(v) AR2_CFG.rageBot.requireADS = v end)
+    addToggle(rageBotSection, "No Weapon Required", AR2_CFG.rageBot, "noWeaponRequired", function(v) AR2_CFG.rageBot.noWeaponRequired = v end)
+    addToggle(rageBotSection, "Protection Mode", AR2_CFG.rageBot, "protection", function(v) AR2_CFG.rageBot.protection = v end)
+    addSlider(rageBotSection, "Protection Radius", AR2_CFG.rageBot, "protectionRadius", 50, 500, function(v) AR2_CFG.rageBot.protectionRadius = v end)
+
+    local weaponModsSection = combatTab:Section({ Title = "Weapon Mods", Box = false })
+    addToggle(weaponModsSection, "No Spread", AR2_CFG.weapon, "noSpread")
+    addToggle(weaponModsSection, "Wallbang", AR2_CFG.weapon, "wallbang", function(v) if v then startWallbangTagging() else stopWallbangTagging() end end)
+    addToggle(weaponModsSection, "All Fire Modes", AR2_CFG.weapon, "allFireModes", function(v) AR2_applyAllFireModes(v) end)
+    addToggle(weaponModsSection, "Instant Reload", AR2_CFG.weapon, "instantReload", function(v) setInstantReloadEnabled(v) end)
+    addToggle(weaponModsSection, "Auto Reload", AR2_CFG.weapon, "autoReload", function(v) AR2_setAutoReload(v) end)
+    addSlider(weaponModsSection, "Recoil Reduction %", AR2_CFG.weapon, "recoilReduction", 0, 100)
+    addToggle(weaponModsSection, "Hitbox Expander", AR2_CFG.weapon, "hbeOn", function(v) AR2_hbeSetEnabled(v) end)
+    addSlider(weaponModsSection, "HBE Size", AR2_CFG.weapon, "hbeSize", 1, 12, function(v) AR2_hbeUpdateSizes() end)
+    addToggle(weaponModsSection, "No Bullet Drop", AR2_CFG.weapon, "noBulletDrop", function(v) AR2_CFG.weapon.noBulletDrop = v end)
+
+    local tracersSection = combatTab:Section({ Title = "Tracers", Box = false })
+    addToggle(tracersSection, "Enabled", AR2_CFG.misc, "tracers", function(v) AR2_tracersUpdate() end)
+    addSlider(tracersSection, "Hue", AR2_CFG.misc, "tracerHue", 0, 360)
+    addSlider(tracersSection, "Length", AR2_CFG.misc, "tracerLength", 1, 30)
+    addSlider(tracersSection, "Width", AR2_CFG.misc, "tracerWidth", 1, 5)
+    addToggle(tracersSection, "Rainbow", AR2_CFG.misc, "tracerRainbow")
+    addToggle(tracersSection, "Lightning", AR2_CFG.misc, "tracerLightning")
+
+    local hmSection = combatTab:Section({ Title = "Hitmarker", Box = false })
+    addToggle(hmSection, "Enabled", AR2_CFG.hitmarker, "enabled", function(v) AR2_toggleHitmarker(v) end)
+    addToggle(hmSection, "Rainbow Color", AR2_CFG.hitmarker, "rainbow", function(v) AR2_CFG.hitmarker.rainbow = v AR2_markDirty() end)
+    addDropdown(hmSection, "Shape", {"X","+","Dot","Diamond","Circle","Square"}, AR2_CFG.hitmarker, "shape", function(v) AR2_CFG.hitmarker.shape = v AR2_markDirty() end)
+    addDropdown(hmSection, "Sound", {"None","Hit Marker","HitMarker 17","Classic Ding","Tick","Warm Ding","Sharp Ping","Game"}, AR2_CFG.hitmarker, "sound", function(v) AR2_CFG.hitmarker.sound = v AR2_markDirty() end)
+    addSlider(hmSection, "Color Hue", AR2_CFG.hitmarker, "colorHue", 0, 360, function(v) AR2_CFG.hitmarker.colorHue = v end)
+    addSlider(hmSection, "Size", AR2_CFG.hitmarker, "size", 5, 80, function(v) AR2_CFG.hitmarker.size = v end)
+    addSlider(hmSection, "Thickness", AR2_CFG.hitmarker, "thickness", 1, 10, function(v) AR2_CFG.hitmarker.thickness = v end)
+    addSlider(hmSection, "Gap (X and +)", AR2_CFG.hitmarker, "gap", 0, 30, function(v) AR2_CFG.hitmarker.gap = v end)
+    addSlider(hmSection, "Opacity", AR2_CFG.hitmarker, "opacity", 0, 1, 0.01, function(v) AR2_CFG.hitmarker.opacity = v end)
+    addSlider(hmSection, "Duration (s)", AR2_CFG.hitmarker, "duration", 0.05, 1.5, 0.05, function(v) AR2_CFG.hitmarker.duration = v end)
+    addSlider(hmSection, "Volume", AR2_CFG.misc, "hitSoundVolume", 0, 100, function(v) AR2_CFG.misc.hitSoundVolume = v end)
+
+    -- Custom hit sound preset dropdown (FIXED)
+    local hitSoundNames = {}
+    for _, p in ipairs(AR2_HITSOUND_PRESETS) do table.insert(hitSoundNames, p.name) end
+    local hitSoundDropdown = hmSection:Dropdown({
+        Title = "Hit Sound Preset",
+        Values = hitSoundNames,
+        Value = AR2_HITSOUND_PRESETS[AR2_hitSoundPresetIdx].name,
+        Callback = function(name)
+            for i, p in ipairs(AR2_HITSOUND_PRESETS) do
+                if p.name == name then AR2_setHitSoundPreset(i) break end
+            end
+        end,
+    })
+    storeElement({
+        getter = function() return AR2_HITSOUND_PRESETS[AR2_hitSoundPresetIdx].name end,
+        setter = function(val) hitSoundDropdown:Set(val) end,
+    })
+    hmSection:Button({ Title = "Previous Sound", Callback = function() AR2_hitSoundPrev() hitSoundDropdown:Set(AR2_HITSOUND_PRESETS[AR2_hitSoundPresetIdx].name) end })
+    hmSection:Button({ Title = "Next Sound", Callback = function() AR2_hitSoundNext() hitSoundDropdown:Set(AR2_HITSOUND_PRESETS[AR2_hitSoundPresetIdx].name) end })
+
+    -- Crosshair Section
+    local crosshairSection = combatTab:Section({ Title = "Custom Crosshair", Box = false })
+    addToggle(crosshairSection, "Enabled", AR2_CFG.crosshair, "enabled", function(v) AR2_toggleCrosshair(v) end)
+    addDropdown(crosshairSection, "Shape", {"Cross", "Dot", "Circle", "T", "Square"}, AR2_CFG.crosshair, "shape", function(v) if AR2_CFG.crosshair.enabled then AR2_buildCrosshair() end end)
+    addSlider(crosshairSection, "Size", AR2_CFG.crosshair, "size", 3, 60)
+    addSlider(crosshairSection, "Gap", AR2_CFG.crosshair, "gap", 0, 30)
+    addSlider(crosshairSection, "Thickness", AR2_CFG.crosshair, "thickness", 1, 6)
+    addSlider(crosshairSection, "Hue", AR2_CFG.crosshair, "hue", 0, 360)
+    addToggle(crosshairSection, "Rainbow", AR2_CFG.crosshair, "rainbow")
+
+    -- Movement Tab
+    local movementTab = Window:Tab({ Title = "Movement", Icon = "move" })
+    local speedSection = movementTab:Section({ Title = "Speed Hack", Box = false })
+    addToggle(speedSection, "Enabled", AR2_CFG.speed, "on", function(v) if v then AR2_speed.start() else AR2_speed.stop() end end)
+    addSlider(speedSection, "Speed %", AR2_CFG.speed, "pct", 100, 400)
+    addToggle(speedSection, "Pulse", AR2_CFG.speed, "pulse")
+    addSlider(speedSection, "Burst", AR2_CFG.speed, "pulseOn", 5, 100)
+    addSlider(speedSection, "Coast", AR2_CFG.speed, "pulseOff", 5, 100)
+    addToggle(speedSection, "Adaptive", AR2_CFG.speed, "adaptive")
+    addSlider(speedSection, "Min %", AR2_CFG.speed, "minPct", 100, 200)
+    addToggle(speedSection, "Airborne", AR2_CFG.speed, "airborne")
+    addToggle(speedSection, "Spoof MoveState", AR2_CFG.speed, "spoof")
+
+    local infJumpSection = movementTab:Section({ Title = "Inf Jump", Box = false })
+    addToggle(infJumpSection, "Enabled", AR2_CFG.misc, "infJump", function(v) if v then AR2_startInfJump() else AR2_stopInfJump() end end)
+
+    local noclipSection = movementTab:Section({ Title = "No Clip", Box = false })
+    addToggle(noclipSection, "Enabled", AR2_CFG.misc, "noclip", function(v) AR2_toggleNoclip(v) end)
+    addSlider(noclipSection, "Noclip Speed", AR2_CFG.misc, "noclipSpeed", 0, 500)
+
+    local bhopSection = movementTab:Section({ Title = "Bunny Hop", Box = false })
+    addToggle(bhopSection, "Enabled", AR2_CFG.misc, "bhop", function(v) if v then AR2_startBhop() else AR2_stopBhop() end end)
+    addSlider(bhopSection, "Hop Height", AR2_CFG.misc, "bhopHeight", 5, 50, function(v) AR2_CFG.misc.bhopHeight = v end)
+
+    local tpDashSection = movementTab:Section({ Title = "TP Dash", Box = false })
+    addToggle(tpDashSection, "Enabled", AR2_CFG.misc, "tpDash", function(v) if v then AR2_startTpDash() else AR2_stopTpDash() end end)
+    addSlider(tpDashSection, "Distance", AR2_CFG.misc, "tpDashStuds", 5, 200, function(v) AR2_CFG.misc.tpDashStuds = v end)
+    addSlider(tpDashSection, "Interval (s)", AR2_CFG.misc, "tpDashInterval", 0.1, 5, 0.1, function(v) AR2_CFG.misc.tpDashInterval = v end)
+    addSlider(tpDashSection, "Vertical Offset", AR2_CFG.misc, "tpDashVert", 0, 5, 0.1, function(v) AR2_CFG.misc.tpDashVert = v end)
+
+    -- Jesus toggle
+    local jesusSection = movementTab:Section({ Title = "Jesus", Box = false })
+    addToggle(jesusSection, "Walk on Water", AR2_CFG.misc, "jesus", function(v) AR2_toggleJesus(v) end)
+
+    -- Cars Tab
+    local carsTab = Window:Tab({ Title = "Cars", Icon = "car" })
+    local carTuningSection = carsTab:Section({ Title = "Tuning", Box = false })
+    addToggle(carTuningSection, "Infinite Fuel", AR2_CFG.car, "fuel", function(v) AR2_carMods.apply() end)
+    addToggle(carTuningSection, "Boost", AR2_CFG.car, "boost", function(v) AR2_carMods.apply() end)
+    addToggle(carTuningSection, "Godmode", AR2_CFG.car, "god", function(v) AR2_carMods.apply() end)
+    addSlider(carTuningSection, "Speed", AR2_CFG.car, "speed", 44, 400)
+    addSlider(carTuningSection, "Torque", AR2_CFG.car, "torque", 1, 10)
+    addToggle(carTuningSection, "All Cars", AR2_CFG.car, "allCars", function(v) AR2_carMods.apply() end)
+
+    local carDashSection = carsTab:Section({ Title = "TP Dash", Box = false })
+    addToggle(carDashSection, "Vehicle TP Dash", AR2_CFG.car, "tpDash", function(v) if v then AR2_startCarDash() else AR2_stopCarDash() end end)
+    addSlider(carDashSection, "Distance", AR2_CFG.car, "tpDashStuds", 5, 300, function(v) AR2_CFG.car.tpDashStuds = v end)
+    addSlider(carDashSection, "Interval (s)", AR2_CFG.car, "tpDashInterval", 0.1, 5, 0.1, function(v) AR2_CFG.car.tpDashInterval = v end)
+    addSlider(carDashSection, "Vertical Offset", AR2_CFG.car, "tpDashVert", 0, 5, 0.1, function(v) AR2_CFG.car.tpDashVert = v end)
+
+    -- Teleport Tab
+    local teleportTab = Window:Tab({ Title = "Teleport", Icon = "target" })
+    local tpToggleSection = teleportTab:Section({ Title = "TP Toggles", Box = false })
+    addToggle(tpToggleSection, "Click TP (T)", AR2_CFG.tp, "clickTPOn")
+    addToggle(tpToggleSection, "Map TP (L)", AR2_CFG.tp, "mapTPOn")
+
+    local playerTPSection = teleportTab:Section({ Title = "Player TP", Box = false })
+    local targetDropdown = playerTPSection:Dropdown({
+        Title = "Target", Values = getPlayerNames(),
+        Value = (AR2_CFG.tp.target == "-") and "None" or AR2_CFG.tp.target,
+        Callback = function(v) AR2_CFG.tp.target = (v == "None") and "-" or v AR2_markDirty() end,
+    })
+    addSlider(playerTPSection, "Behind", AR2_CFG.tp, "behind", -30, 30)
+    addSlider(playerTPSection, "Above", AR2_CFG.tp, "above", -20, 60)
+    addSlider(playerTPSection, "Side", AR2_CFG.tp, "side", -30, 30)
+    playerTPSection:Button({ Title = "TP to Target", Callback = function() AR2_tp.toPlayer() end })
+    playerTPSection:Button({ Title = "Refresh Player List", Callback = function() targetDropdown:Refresh(getPlayerNames()) end })
+    addToggle(playerTPSection, "Respawn TP", AR2_CFG.tp, "respawnTP", function(v) AR2_toggleRespawnTP(v) end)
+
+    local mapTPSection = teleportTab:Section({ Title = "Map TP", Box = false })
+    mapTPSection:Button({ Title = "Open Map", Callback = function() AR2_tp.toggleMap(true) end })
+
+    local waypointSection = teleportTab:Section({ Title = "Waypoints", Box = false })
+    waypointSection:Button({ Title = "Save Spot", Callback = function() AR2_tp.saveWaypoint() end })
+    for i=1,5 do
+        waypointSection:Button({ Title = "WP "..i, Callback = function()
+            local wp = AR2_CFG.tp.waypoints[i]
+            if wp then AR2_tp.toPosition(Vector3.new(wp.x, wp.y, wp.z), wp.name) end
+        end })
+    end
+
+    -- Radar Tab
+    local radarTab = Window:Tab({ Title = "Radar", Icon = "map" })
+    local radarSection = radarTab:Section({ Title = "Map Radar", Box = false })
+    addToggle(radarSection, "Enabled", AR2_CFG.radar, "on", function(v) if v then AR2_radar.start() else AR2_radar.stop() end end)
+    addToggle(radarSection, "Names", AR2_CFG.radar, "names")
+    addToggle(radarSection, "Include Self", AR2_CFG.radar, "localToo")
+    addToggle(radarSection, "Armed Color", AR2_CFG.radar, "armedColor")
+    addToggle(radarSection, "Show Weapon", AR2_CFG.radar, "weapon", function(v) AR2_CFG.radar.weapon = v end)
+    addToggle(radarSection, "Show Distance", AR2_CFG.radar, "dist", function(v) AR2_CFG.radar.dist = v end)
+    local minimapSection = radarTab:Section({ Title = "Minimap", Box = false })
+    addToggle(minimapSection, "Enabled", AR2_CFG.minimap, "on", function(v) AR2_minimapEnabled = v AR2_minimapUpdate() AR2_updateMinimap() end)
+    addSlider(minimapSection, "Size", AR2_CFG.minimap, "size", 100, 600, function(v) AR2_updateMinimap() end)
+
+    -- Misc Tab
+    local miscTab = Window:Tab({ Title = "Misc", Icon = "box" })
+    local freezeSection = miscTab:Section({ Title = "Freeze Zombies", Box = false })
+    addToggle(freezeSection, "Enabled", AR2_CFG.misc, "freeze", function(v) if v then AR2_freeze.start() else AR2_freeze.stop() end end)
+    addToggle(freezeSection, "Whole Server", AR2_CFG.misc, "freezeAll")
+    addToggle(freezeSection, "Anchor", AR2_CFG.misc, "freezeAnchor")
+    addSlider(freezeSection, "Radius", AR2_CFG.misc, "freezeRadius", 50, 2000)
+
+    local cameraSection = miscTab:Section({ Title = "Camera", Box = false })
+    addToggle(cameraSection, "Distance Zoom", AR2_CFG.misc, "distZoomEnabled", function(v) AR2_toggleDistZoomEnabled(v) end)
+    addToggle(cameraSection, "Zoom In", AR2_CFG.misc, "distZoomActive", function(v) AR2_toggleDistanceZoom(v) end)
+    addSlider(cameraSection, "Normal Distance", AR2_CFG.misc, "normalDist", 3, 30, function(v) AR2_setNormalDistance(v) end)
+    addSlider(cameraSection, "Zoomed Distance", AR2_CFG.misc, "zoomedDist", 1, 10, function(v) AR2_setZoomedDistance(v) end)
+
+    local outlineSection = miscTab:Section({ Title = "Player Outlines", Box = false })
+    addToggle(outlineSection, "Enabled", AR2_CFG.misc, "charm", function(v) AR2_toggleCharm(v) end)
+    addDropdown(outlineSection, "Mode", {"Color", "BlackWhite"}, AR2_CFG.misc, "charmMode", function(v) AR2_setCharmMode(v) end)
+    addSlider(outlineSection, "Hue", AR2_CFG.misc, "charmHue", 0, 360, function(v) AR2_setCharmHue(v) end)
+    addSlider(outlineSection, "Gray (BlackWhite)", AR2_CFG.misc, "charmGray", 0, 100, function(v) AR2_setCharmGray(v) end)
+    addToggle(outlineSection, "Rainbow", AR2_CFG.misc, "charmRainbow", function(v) AR2_toggleCharmRainbow(v) end)
+    addToggle(outlineSection, "Global Outline", AR2_CFG.misc, "globalCharm", function(v) AR2_applyCharm(AR2_LocalPlayer.Character) end)
+
+    local personalSection = miscTab:Section({ Title = "Personal Chams", Box = false })
+    addToggle(personalSection, "Character Appearance", AR2_CFG.misc, "personalCharOn",
+        function(v) AR2_setPersonalCharacter(v, AR2_CFG.misc.personalCharMode, AR2_CFG.misc.personalCharHue, AR2_CFG.misc.personalCharGray, AR2_CFG.misc.personalCharMaterial, AR2_CFG.misc.personalCharRainbow) end)
+    addDropdown(personalSection, "Character Mode", {"Color", "BlackWhite"}, AR2_CFG.misc, "personalCharMode",
+        function(v) if AR2_CFG.misc.personalCharOn then AR2_setPersonalCharacter(true, v, AR2_CFG.misc.personalCharHue, AR2_CFG.misc.personalCharGray, AR2_CFG.misc.personalCharMaterial, AR2_CFG.misc.personalCharRainbow) end end)
+    addSlider(personalSection, "Character Hue", AR2_CFG.misc, "personalCharHue", 0, 360,
+        function(v) if AR2_CFG.misc.personalCharOn then AR2_setPersonalCharacter(true, AR2_CFG.misc.personalCharMode, v, AR2_CFG.misc.personalCharGray, AR2_CFG.misc.personalCharMaterial, AR2_CFG.misc.personalCharRainbow) end end)
+    addSlider(personalSection, "Character Gray", AR2_CFG.misc, "personalCharGray", 0, 100,
+        function(v) if AR2_CFG.misc.personalCharOn then AR2_setPersonalCharacter(true, AR2_CFG.misc.personalCharMode, AR2_CFG.misc.personalCharHue, v, AR2_CFG.misc.personalCharMaterial, AR2_CFG.misc.personalCharRainbow) end end)
+    addDropdown(personalSection, "Character Material", {"ForceField", "Neon"}, AR2_CFG.misc, "personalCharMaterial",
+        function(v) if AR2_CFG.misc.personalCharOn then AR2_setPersonalCharacter(true, AR2_CFG.misc.personalCharMode, AR2_CFG.misc.personalCharHue, AR2_CFG.misc.personalCharGray, v, AR2_CFG.misc.personalCharRainbow) end end)
+    addToggle(personalSection, "Character Rainbow", AR2_CFG.misc, "personalCharRainbow",
+        function(v) if AR2_CFG.misc.personalCharOn then AR2_setPersonalCharacter(true, AR2_CFG.misc.personalCharMode, AR2_CFG.misc.personalCharHue, AR2_CFG.misc.personalCharGray, AR2_CFG.misc.personalCharMaterial, v) end end)
+
+    addToggle(personalSection, "Gun Appearance", AR2_CFG.misc, "personalGunOn",
+        function(v) AR2_setPersonalGun(v, AR2_CFG.misc.personalGunMode, AR2_CFG.misc.personalGunHue, AR2_CFG.misc.personalGunGray, AR2_CFG.misc.personalGunMaterial, AR2_CFG.misc.personalGunRainbow) end)
+    addDropdown(personalSection, "Gun Mode", {"Color", "BlackWhite"}, AR2_CFG.misc, "personalGunMode",
+        function(v) if AR2_CFG.misc.personalGunOn then AR2_setPersonalGun(true, v, AR2_CFG.misc.personalGunHue, AR2_CFG.misc.personalGunGray, AR2_CFG.misc.personalGunMaterial, AR2_CFG.misc.personalGunRainbow) end end)
+    addSlider(personalSection, "Gun Hue", AR2_CFG.misc, "personalGunHue", 0, 360,
+        function(v) if AR2_CFG.misc.personalGunOn then AR2_setPersonalGun(true, AR2_CFG.misc.personalGunMode, v, AR2_CFG.misc.personalGunGray, AR2_CFG.misc.personalGunMaterial, AR2_CFG.misc.personalGunRainbow) end end)
+    addSlider(personalSection, "Gun Gray", AR2_CFG.misc, "personalGunGray", 0, 100,
+        function(v) if AR2_CFG.misc.personalGunOn then AR2_setPersonalGun(true, AR2_CFG.misc.personalGunMode, AR2_CFG.misc.personalGunHue, v, AR2_CFG.misc.personalGunMaterial, AR2_CFG.misc.personalGunRainbow) end end)
+    addDropdown(personalSection, "Gun Material", {"Neon", "ForceField"}, AR2_CFG.misc, "personalGunMaterial",
+        function(v) if AR2_CFG.misc.personalGunOn then AR2_setPersonalGun(true, AR2_CFG.misc.personalGunMode, AR2_CFG.misc.personalGunHue, AR2_CFG.misc.personalGunGray, v, AR2_CFG.misc.personalGunRainbow) end end)
+    addToggle(personalSection, "Gun Rainbow", AR2_CFG.misc, "personalGunRainbow",
+        function(v) if AR2_CFG.misc.personalGunOn then AR2_setPersonalGun(true, AR2_CFG.misc.personalGunMode, AR2_CFG.misc.personalGunHue, AR2_CFG.misc.personalGunGray, AR2_CFG.misc.personalGunMaterial, v) end end)
+
+    local hideSection = miscTab:Section({ Title = "Hide", Box = false })
+    addToggle(hideSection, "Hide Player", AR2_CFG.misc, "hidePlayer", function(v) AR2_toggleHidePlayer(v) end)
+    addToggle(hideSection, "Hide Gun", AR2_CFG.misc, "hideGun", function(v) AR2_toggleHideGun(v) end)
+
+    local extrasSection = miscTab:Section({ Title = "Extras", Box = false })
+    addToggle(extrasSection, "Self Backtrack", AR2_CFG.misc.selfBacktrack, "enabled", function(v) AR2_setSelfBacktrack(v) end)
+    addToggle(extrasSection, "Jump Circle", AR2_CFG.misc.jumpCircle, "enabled", function(v) AR2_setJumpCircle(v) end)
+    addToggle(extrasSection, "Instant Interact", AR2_CFG.misc, "instantInteract", function(v) AR2_setInstantInteract(v) end)
+    addToggle(extrasSection, "Container Persistence", AR2_CFG.misc, "containerPersistence", function(v) AR2_setContainerPersistence(v) end)
+    addToggle(extrasSection, "Container Persist (Close Blocker)", AR2_CFG.misc, "containerPersist", function(v) AR2_setContainerPersist(v) end)
+    addToggle(extrasSection, "Player Jesus", AR2_CFG.misc, "playerJesus", function(v) AR2_setPlayerJesus(v) end)
+
+    -- Cosmetics Tab
+    local cosTab = Window:Tab({ Title = "Cosmetics", Icon = "sparkles" })
+    local cosSection = cosTab:Section({ Title = "Cosmetic Unlocker", Box = false })
+    addToggle(cosSection, "Enabled — click items in wardrobe to wear", AR2_CFG.misc, "cosUnlock", function(v)
+        AR2_cosSetEnabled(v)
+    end)
+    cosSection:Button({ Title = "Remove All Cosmetics", Callback = function() AR2_cosRemoveAll() end })
+    cosSection:Button({ Title = "How to use: enable → open wardrobe → click any item", Callback = function() end })
+
+    -- World Tab
+    local worldTab = Window:Tab({ Title = "World", Icon = "globe" })
+    local lightingSection = worldTab:Section({ Title = "Lighting", Box = false })
+    addToggle(lightingSection, "Fullbright", AR2_CFG.visuals, "fullbright", function(v) AR2_visuals.apply() end)
+    addToggle(lightingSection, "No Fog", AR2_CFG.visuals, "nofog", function(v) AR2_visuals.apply() end)
+    addToggle(lightingSection, "Set Time", AR2_CFG.visuals, "setTime", function(v) AR2_visuals.apply() end)
+    addSlider(lightingSection, "Brightness", AR2_CFG.visuals, "brightness", 0, 10, function(v) AR2_visuals.apply() end)
+    addSlider(lightingSection, "Time", AR2_CFG.visuals, "time", 0, 24, function(v) AR2_visuals.apply() end)
+    addDropdown(lightingSection, "Skybox", {"Default", "Night", "Bluesky"}, AR2_CFG.visuals, "skybox", function(v) AR2_applySkybox(v) end)
+
+    local cloudsSection = worldTab:Section({ Title = "Clouds", Box = false })
+    addToggle(cloudsSection, "Enable Clouds", AR2_CFG.visuals, "cloudsEnabled", function(v) AR2_setClouds(v, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, AR2_CFG.visuals.cloudsDensity) end)
+    addToggle(cloudsSection, "Modify Clouds", AR2_CFG.visuals, "modifyClouds", function(v) AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, v, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, AR2_CFG.visuals.cloudsDensity) end)
+    if WindUI.ColorPicker then
+        cloudsSection:ColorPicker({ Title = "Cloud Color", Value = AR2_CFG.visuals.cloudsColor, Callback = function(v)
+            AR2_CFG.visuals.cloudsColor = v
+            AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, AR2_CFG.visuals.modifyClouds, v, AR2_CFG.visuals.cloudsCover, AR2_CFG.visuals.cloudsDensity)
+        end })
+    end
+    addSlider(cloudsSection, "Cloud Cover", AR2_CFG.visuals, "cloudsCover", 0, 1, 0.01, function(v) AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, v, AR2_CFG.visuals.cloudsDensity) end)
+    addSlider(cloudsSection, "Cloud Density", AR2_CFG.visuals, "cloudsDensity", 0, 1, 0.01, function(v) AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, v) end)
+
+    local ccSection = worldTab:Section({ Title = "Color Correction", Box = false })
+    addToggle(ccSection, "Enable Color Correction", AR2_CFG.visuals, "colorCorrectionEnabled", function(v) AR2_setColorCorrection(v, AR2_CFG.visuals.ccSaturation, AR2_CFG.visuals.ccContrast, AR2_CFG.visuals.ccBrightness) end)
+    addSlider(ccSection, "Saturation", AR2_CFG.visuals, "ccSaturation", 0, 2, 0.1, function(v) AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, v, AR2_CFG.visuals.ccContrast, AR2_CFG.visuals.ccBrightness) end)
+    addSlider(ccSection, "Contrast", AR2_CFG.visuals, "ccContrast", 0, 1, 0.1, function(v) AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, AR2_CFG.visuals.ccSaturation, v, AR2_CFG.visuals.ccBrightness) end)
+    addSlider(ccSection, "Brightness", AR2_CFG.visuals, "ccBrightness", 0.2, 2, 0.1, function(v) AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, AR2_CFG.visuals.ccSaturation, AR2_CFG.visuals.ccContrast, v) end)
+
+    addToggle(lightingSection, "Remove Shadows", AR2_CFG.misc, "removeShadows", function(v) AR2_setRemoveShadows(v) end)
+
+    local removeSection = worldTab:Section({ Title = "Performance", Box = false })
+    addToggle(removeSection, "Remove Textures", AR2_CFG.misc, "removeTextures", function(v) AR2_toggleRemoveTextures(v) end)
+    addToggle(removeSection, "Remove Leaves", AR2_CFG.misc, "removeLeaves", function(v) AR2_toggleRemoveLeaves(v) end)
+    addToggle(removeSection, "Remove Bushes", AR2_CFG.misc, "removeBushes", function(v) AR2_toggleRemoveBushes(v) end)
+    addToggle(removeSection, "Remove Trees", AR2_CFG.misc, "removeTrees", function(v) AR2_toggleRemoveTrees(v) end)
+
+    -- Settings Tab
+    local settingsTab = Window:Tab({ Title = "Settings", Icon = "settings" })
+    local settingsSection = settingsTab:Section({ Title = "Configs", Box = false })
+    settingsSection:Button({ Title = "Save Current Config", Callback = function()
+        AR2_promptConfigName(function(name)
+            if AR2_saveConfig(name) then
+                WindUI:Notify({ Title = "Config", Content = "Saved as " .. name, Duration = 3 })
+                configDropdown:Refresh(AR2_refreshConfigList())
+            else WindUI:Notify({ Title = "Config", Content = "Save failed", Duration = 3 }) end
+        end)
+    end })
+    local configDropdown = settingsSection:Dropdown({
+        Title = "Load Config", Values = AR2_refreshConfigList(), Value = "",
+        Callback = function(name)
+            if name and name ~= "" then
+                if AR2_loadConfigByName(name) then WindUI:Notify({ Title = "Config", Content = "Loaded " .. name, Duration = 3 })
+                else WindUI:Notify({ Title = "Config", Content = "Load failed", Duration = 3 }) end
+            end
+        end
+    })
+    settingsSection:Button({ Title = "Refresh Config List", Callback = function() configDropdown:Refresh(AR2_refreshConfigList()) end })
+    settingsSection:Button({ Title = "Delete Selected Config", Callback = function()
+        local selected = configDropdown.Value
+        if selected and selected ~= "" then AR2_deleteConfig(selected) configDropdown:Refresh(AR2_refreshConfigList()) end
+    end })
+    settingsSection:Button({ Title = "Reset To Default (All Off)", Callback = function() AR2_resetConfig() end })
+
+    -- Keybinds Tab
+    local KEYBIND_KEYS = {
+        "None","Q","E","R","F","G","Z","X","C","V","B","N","M",
+        "1","2","3","4","5","6","7","8","9","0",
+        "F1","F2","F3","F4","F5","F6","F7","F8","F9","F10","F11","F12",
+        "LeftAlt","RightAlt","Tab","CapsLock","LeftShift","RightShift",
+        "Insert","Delete","Home","End","PageUp","PageDown",
+        "Up","Down","Left","Right","MouseButton3",
+    }
+
+    local keybindsTab = Window:Tab({ Title = "Keybinds", Icon = "keyboard" })
+
+    local espKbSection = keybindsTab:Section({ Title = "ESP", Box = false })
+    addDropdown(espKbSection, "Player ESP", KEYBIND_KEYS, AR2_CFG.keybinds, "playerESP", function(v) AR2_CFG.keybinds.playerESP = v end)
+    addDropdown(espKbSection, "Zombie ESP", KEYBIND_KEYS, AR2_CFG.keybinds, "zombieESP", function(v) AR2_CFG.keybinds.zombieESP = v end)
+    addDropdown(espKbSection, "Loot ESP", KEYBIND_KEYS, AR2_CFG.keybinds, "lootESP", function(v) AR2_CFG.keybinds.lootESP = v end)
+
+    local combatKbSection = keybindsTab:Section({ Title = "Combat", Box = false })
+    addDropdown(combatKbSection, "Silent Aim", KEYBIND_KEYS, AR2_CFG.keybinds, "silentAim", function(v) AR2_CFG.keybinds.silentAim = v end)
+    addDropdown(combatKbSection, "Rage Bot", KEYBIND_KEYS, AR2_CFG.keybinds, "rageBot", function(v) AR2_CFG.keybinds.rageBot = v end)
+    addDropdown(combatKbSection, "Protection Mode", KEYBIND_KEYS, AR2_CFG.keybinds, "protection", function(v) AR2_CFG.keybinds.protection = v end)
+    addDropdown(combatKbSection, "HBE", KEYBIND_KEYS, AR2_CFG.keybinds, "hbe", function(v) AR2_CFG.keybinds.hbe = v end)
+    addDropdown(combatKbSection, "No Spread", KEYBIND_KEYS, AR2_CFG.keybinds, "noSpread", function(v) AR2_CFG.keybinds.noSpread = v end)
+    addDropdown(combatKbSection, "No Bullet Drop", KEYBIND_KEYS, AR2_CFG.keybinds, "noBulletDrop", function(v) AR2_CFG.keybinds.noBulletDrop = v end)
+    addDropdown(combatKbSection, "Instant Reload", KEYBIND_KEYS, AR2_CFG.keybinds, "instantReload", function(v) AR2_CFG.keybinds.instantReload = v end)
+    addDropdown(combatKbSection, "All Fire Modes", KEYBIND_KEYS, AR2_CFG.keybinds, "allFireModes", function(v) AR2_CFG.keybinds.allFireModes = v end)
+    addDropdown(combatKbSection, "Wallbang", KEYBIND_KEYS, AR2_CFG.keybinds, "wallbang", function(v) AR2_CFG.keybinds.wallbang = v end)
+    addDropdown(combatKbSection, "Tracers", KEYBIND_KEYS, AR2_CFG.keybinds, "tracers", function(v) AR2_CFG.keybinds.tracers = v end)
+    addDropdown(combatKbSection, "Crosshair", KEYBIND_KEYS, AR2_CFG.keybinds, "crosshair", function(v) AR2_CFG.keybinds.crosshair = v end)
+
+    local movementKbSection = keybindsTab:Section({ Title = "Movement", Box = false })
+    addDropdown(movementKbSection, "Speed Hack", KEYBIND_KEYS, AR2_CFG.keybinds, "speedHack", function(v) AR2_CFG.keybinds.speedHack = v end)
+    addDropdown(movementKbSection, "Inf Jump", KEYBIND_KEYS, AR2_CFG.keybinds, "infJump", function(v) AR2_CFG.keybinds.infJump = v end)
+    addDropdown(movementKbSection, "Noclip", KEYBIND_KEYS, AR2_CFG.keybinds, "noclip", function(v) AR2_CFG.keybinds.noclip = v end)
+
+    local miscKbSection = keybindsTab:Section({ Title = "Misc", Box = false })
+    addDropdown(miscKbSection, "Freeze Zombies", KEYBIND_KEYS, AR2_CFG.keybinds, "freezeZombies", function(v) AR2_CFG.keybinds.freezeZombies = v end)
+    addDropdown(miscKbSection, "Fullbright", KEYBIND_KEYS, AR2_CFG.keybinds, "fullbright", function(v) AR2_CFG.keybinds.fullbright = v end)
+
+    WindUI:Notify({ Title = "7177 Scripts", Content = "Loaded", Duration = 5 })
+
+    function AR2_refreshUI()
+        for _, elem in ipairs(AR2_UI_ELEMENTS) do
+            local val = elem.getter()
+            if val ~= nil then pcall(function() elem.setter(val) end) end
+        end
+    end
+
+    AR2_refreshUI()
+else
+    warn("WindUI failed to load")
+end
+
+function AR2_promptConfigName(callback)
+    local promptGui = Instance.new("ScreenGui")
+    promptGui.Name = "AR2ConfigPrompt" promptGui.ResetOnSpawn = false
+    promptGui.Parent = (AR2_gethui and AR2_gethui()) or game:GetService("CoreGui")
+
+    local promptFrame = Instance.new("Frame")
+    promptFrame.Size = UDim2.fromOffset(300, 100) promptFrame.Position = UDim2.fromScale(0.5, 0.5)
+    promptFrame.AnchorPoint = Vector2.new(0.5, 0.5) promptFrame.BackgroundColor3 = Color3.fromRGB(30,30,35)
+    promptFrame.BorderSizePixel = 0 promptFrame.Parent = promptGui
+    local promptCorner = Instance.new("UICorner") promptCorner.CornerRadius = UDim.new(0, 8) promptCorner.Parent = promptFrame
+
+    local promptTitle = Instance.new("TextLabel")
+    promptTitle.Size = UDim2.new(1, -20, 0, 20) promptTitle.Position = UDim2.fromOffset(10, 5)
+    promptTitle.BackgroundTransparency = 1 promptTitle.Text = "Enter config name:"
+    promptTitle.TextColor3 = Color3.fromRGB(255,255,255) promptTitle.Font = Enum.Font.GothamBold
+    promptTitle.TextSize = 14 promptTitle.TextXAlignment = Enum.TextXAlignment.Center promptTitle.Parent = promptFrame
+
+    local promptInput = Instance.new("TextBox")
+    promptInput.Size = UDim2.new(1, -40, 0, 30) promptInput.Position = UDim2.fromOffset(20, 30)
+    promptInput.BackgroundColor3 = Color3.fromRGB(45,45,50) promptInput.TextColor3 = Color3.fromRGB(255,255,255)
+    promptInput.PlaceholderText = "Name" promptInput.Font = Enum.Font.SourceSans promptInput.TextSize = 14
+    promptInput.TextXAlignment = Enum.TextXAlignment.Center promptInput.Parent = promptFrame
+
+    local confirmBtn = Instance.new("TextButton")
+    confirmBtn.Size = UDim2.fromOffset(100, 25) confirmBtn.Position = UDim2.fromOffset(55, 65)
+    confirmBtn.BackgroundColor3 = Color3.fromRGB(0,170,255) confirmBtn.TextColor3 = Color3.fromRGB(255,255,255)
+    confirmBtn.Text = "Save" confirmBtn.Font = Enum.Font.GothamBold confirmBtn.TextSize = 12 confirmBtn.Parent = promptFrame
+    local confirmCorner = Instance.new("UICorner") confirmCorner.CornerRadius = UDim.new(0, 5) confirmCorner.Parent = confirmBtn
+
+    local cancelBtn = Instance.new("TextButton")
+    cancelBtn.Size = UDim2.fromOffset(100, 25) cancelBtn.Position = UDim2.fromOffset(165, 65)
+    cancelBtn.BackgroundColor3 = Color3.fromRGB(80,80,90) cancelBtn.TextColor3 = Color3.fromRGB(255,255,255)
+    cancelBtn.Text = "Cancel" cancelBtn.Font = Enum.Font.GothamBold cancelBtn.TextSize = 12 cancelBtn.Parent = promptFrame
+    local cancelCorner = Instance.new("UICorner") cancelCorner.CornerRadius = UDim.new(0, 5) cancelCorner.Parent = cancelBtn
+
+    confirmBtn.MouseButton1Click:Connect(function() local name = promptInput.Text promptGui:Destroy() if callback then callback(name) end end)
+    cancelBtn.MouseButton1Click:Connect(function() promptGui:Destroy() end)
+end
+
+AR2_UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    local keyName = input.KeyCode.Name
+    if keyName == "T" and AR2_CFG.tp.clickTPOn then AR2_tp.toMouse()
+    elseif keyName == "Y" then AR2_tp.toPlayer()
+    elseif keyName == "L" and AR2_CFG.tp.mapTPOn then AR2_tp.toggleMap(true)
+    elseif keyName == "H" then AR2_car.toCursor(AR2_CFG.car.method) end
+end)
+
+-- =============================================
+-- FINAL INITIALIZATION
+-- =============================================
+AR2_tracersEnabled = AR2_CFG.misc.tracers
+AR2_esp.update()
+if AR2_CFG.aim.on then AR2_aim.start() end
+AR2_magicUpdate()
+AR2_tracersUpdate()
+if AR2_CFG.misc.freeze then AR2_freeze.start() end
+AR2_visuals.apply()
+AR2_carMods.apply()
+if AR2_CFG.radar.on then AR2_radar.start() end
+if AR2_CFG.speed.on then AR2_speed.start() end
+pcall(AR2_rageBotSetEnabled, AR2_CFG.rageBot.on)
+AR2_toggleFOVZoom(AR2_CFG.misc.fovZoom)
+AR2_toggleDistZoomEnabled(AR2_CFG.misc.distZoomEnabled)
+AR2_toggleDistanceZoom(AR2_CFG.misc.distZoomActive)
+if AR2_CFG.misc.charm then AR2_toggleCharm(true) end
+if AR2_CFG.minimap.on then AR2_minimapEnabled = true AR2_updateMinimap() end
+if AR2_CFG.misc.noclip then AR2_startNoclip() end
+if AR2_CFG.misc.infJump then AR2_startInfJump() end
+if AR2_CFG.misc.bhop then AR2_startBhop() end
+if AR2_CFG.misc.tpDash then AR2_startTpDash() end
+if AR2_CFG.car.tpDash then AR2_startCarDash() end
+AR2_toggleRemoveTextures(AR2_CFG.misc.removeTextures)
+AR2_toggleRemoveLeaves(AR2_CFG.misc.removeLeaves)
+AR2_toggleRemoveBushes(AR2_CFG.misc.removeBushes)
+AR2_toggleRemoveTrees(AR2_CFG.misc.removeTrees)
+if AR2_CFG.misc.hidePlayer then AR2_toggleHidePlayer(true) end
+if AR2_CFG.misc.hideGun then AR2_toggleHideGun(true) end
+if AR2_CFG.weapon.wallbang then startWallbangTagging() else stopWallbangTagging() end
+AR2_applyAllFireModes(AR2_CFG.weapon.allFireModes)
+if AR2_CFG.weapon.instantReload then setInstantReloadEnabled(true) end
+if AR2_CFG.misc.personalCharOn then AR2_setPersonalCharacter(true, AR2_CFG.misc.personalCharMode, AR2_CFG.misc.personalCharHue, AR2_CFG.misc.personalCharGray, AR2_CFG.misc.personalCharMaterial, AR2_CFG.misc.personalCharRainbow) end
+if AR2_CFG.misc.personalGunOn then AR2_setPersonalGun(true, AR2_CFG.misc.personalGunMode, AR2_CFG.misc.personalGunHue, AR2_CFG.misc.personalGunGray, AR2_CFG.misc.personalGunMaterial, AR2_CFG.misc.personalGunRainbow) end
+if AR2_CFG.visuals.skybox ~= "Default" then AR2_applySkybox(AR2_CFG.visuals.skybox) end
+AR2_toggleHitmarker(AR2_CFG.hitmarker.enabled)
+AR2_toggleCrosshair(AR2_CFG.crosshair.enabled)
+if AR2_CFG.tp.respawnTP then AR2_toggleRespawnTP(true) end
+if AR2_CFG.weapon.hbeOn then AR2_hbeSetEnabled(true) end
+if AR2_CFG.misc.cosUnlock then AR2_cosSetEnabled(true) end
+AR2_setAutoReload(AR2_CFG.weapon.autoReload)
+AR2_setInstantInteract(AR2_CFG.misc.instantInteract)
+AR2_setContainerPersistence(AR2_CFG.misc.containerPersistence)
+AR2_setContainerPersist(AR2_CFG.misc.containerPersist)
+AR2_setPlayerJesus(AR2_CFG.misc.playerJesus)
+AR2_setSelfBacktrack(AR2_CFG.misc.selfBacktrack.enabled)
+AR2_setJumpCircle(AR2_CFG.misc.jumpCircle.enabled)
+AR2_setRemoveShadows(AR2_CFG.misc.removeShadows)
+AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, AR2_CFG.visuals.cloudsDensity)
+AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, AR2_CFG.visuals.ccSaturation, AR2_CFG.visuals.ccContrast, AR2_CFG.visuals.ccBrightness)
+AR2_toggleJesus(AR2_CFG.misc.jesus)
+AR2_toggleClouds(AR2_CFG.visuals.clouds)
+
+AR2_registerAllKeybinds()
+
+function AR2_unload()
+    AR2_esp.destroy()
+    AR2_aim.destroy()
+    AR2_magicUpdate()
+    AR2_tracersStop()
+    AR2_freeze.destroy()
+    AR2_visuals.destroy()
+    AR2_carMods.destroy()
+    AR2_radar.destroy()
+    AR2_speed.stop()
+    pcall(AR2_rageBotSetEnabled, false)
+    AR2_toggleFOVZoom(false)
+    AR2_toggleDistZoomEnabled(false)
+    AR2_toggleDistanceZoom(false)
+    AR2_stopNoclip()
+    AR2_stopInfJump()
+    AR2_stopBhop()
+    AR2_stopTpDash()
+    AR2_stopCarDash()
+    AR2_toggleRemoveTextures(false)
+    AR2_toggleRemoveLeaves(false)
+    AR2_toggleRemoveBushes(false)
+    AR2_toggleRemoveTrees(false)
+    AR2_toggleHidePlayer(false)
+    AR2_toggleHideGun(false)
+    stopWallbangTagging()
+    AR2_applyAllFireModes(false)
+    setInstantReloadEnabled(false)
+    AR2_setPersonalCharacter(false)
+    AR2_setPersonalGun(false)
+    if AR2_CFG.visuals.skybox ~= "Default" then AR2_applySkybox("Default") end
+    AR2_toggleHitmarker(false)
+    AR2_toggleCrosshair(false)
+    AR2_toggleRespawnTP(false)
+    AR2_hbeSetEnabled(false)
+    AR2_cosSetEnabled(false)
+    AR2_setAutoReload(false)
+    AR2_setInstantInteract(false)
+    AR2_setContainerPersistence(false)
+    AR2_setContainerPersist(false)
+    AR2_setPlayerJesus(false)
+    AR2_setSelfBacktrack(false)
+    AR2_setJumpCircle(false)
+    AR2_setRemoveShadows(false)
+    AR2_setClouds(false, false, nil, nil, nil)
+    AR2_setColorCorrection(false)
+    AR2_toggleJesus(false)
+    AR2_toggleClouds(false)
+    if AR2_mapConn then AR2_mapConn:Disconnect() end
+    if AR2_mapGui then AR2_mapGui:Destroy() end
+    if AR2_minimapGui then AR2_minimapGui:Destroy() end
+end
+getgenv().__AR2_UNLOAD = AR2_unload
