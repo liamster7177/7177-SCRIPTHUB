@@ -38,7 +38,28 @@ AR2_Characters = AR2_Workspace:WaitForChild("Characters", 5)
 AR2_Corpses = AR2_Workspace:WaitForChild("Corpses", 5)
 AR2_Zombies = AR2_Workspace:WaitForChild("Zombies", 5)
 AR2_Vehicles = AR2_Workspace:WaitForChild("Vehicles", 5)
+-- Early definitions to prevent nil references
+AR2_parts = function(model)
+    return {
+        root = model:FindFirstChild("HumanoidRootPart"),
+        head = model:FindFirstChild("Head"),
+        headCollider = model:FindFirstChild("HeadCollider"),
+        torso = model:FindFirstChild("UpperTorso"),
+        lowerTorso = model:FindFirstChild("LowerTorso"),
+    }
+end
 
+AR2_esp = {}
+-- Initialize tables used by stubs to prevent nil indexing
+AR2_aim = {}
+AR2_magicAim = {}
+AR2_speed = {}
+AR2_radar = {}
+AR2_freeze = {}
+AR2_visuals = {}
+AR2_carMods = {}
+AR2_car = {}
+AR2_tp = {}
 -- Corpse memory
 AR2_corpseMemory = {}
 AR2_Players.PlayerRemoving:Connect(function(player)
@@ -87,7 +108,11 @@ AR2_CFG = {
     visuals = { fullbright = false, nofog = false, setTime = false, brightness = 3, time = 14, skybox = "Default",
                 cloudsEnabled = false, modifyClouds = false, cloudsColor = Color3.fromRGB(255,255,255), cloudsCover = 0.5, cloudsDensity = 0.5,
                 colorCorrectionEnabled = false, ccSaturation = 1, ccContrast = 0.5, ccBrightness = 1 },
-    car = { fuel = false, boost = false, god = false, speed = 120, torque = 3, allCars = false, method = "desync" },
+    car = {
+        fuel = false, boost = false, god = false, speed = 120, torque = 3,
+        allCars = false, method = "desync",
+        tpDash = false, tpDashStuds = 30, tpDashInterval = 2,
+    },
     tp = {
         target = "-", behind = 10, above = 0, side = 0,
         clickKey = "T", playerKey = "Y", mapKey = "L", clickLift = 0,
@@ -103,6 +128,8 @@ AR2_CFG = {
     minimap = { on = false, size = 200, x = 10, y = 50 },
     misc = {
         infJump = false, noclip = false, noclipSpeed = 90,
+        bhop = false, bhopHeight = 15,
+        tpDash = false, tpDashStuds = 30, tpDashInterval = 2,
         fovZoom = false, zoomFOV = 30, distZoomEnabled = false, distZoomActive = false,
         normalDist = 10, zoomedDist = 3,
         removeTextures = false, removeLeaves = false, removeBushes = false,
@@ -149,12 +176,71 @@ AR2_CFG = {
     },
 }
 
--- Initialize missing globals
-AR2_reloadWatchLast = 0
-AR2_reloadWatchConn = nil
+-- State vars
 AR2_rageBotConn     = nil
 AR2_rageBotHeld     = false
-AR2_rageBotTarget   = nil
+AR2_reloadWatchLast = AR2_reloadWatchLast or 0
+AR2_reloadWatchConn = AR2_reloadWatchConn or nil
+
+-- =============================================
+-- FUNCTION STUBS (prevent nil call before real definitions)
+-- =============================================
+function AR2_esp.update() end
+function AR2_aim.start() end
+function AR2_aim.stop() end
+function AR2_magicUpdate() end
+function AR2_tracersUpdate() end
+function AR2_freeze.start() end
+function AR2_freeze.stop() end
+function AR2_visuals.apply() end
+function AR2_carMods.apply() end
+function AR2_radar.start() end
+function AR2_radar.stop() end
+function AR2_speed.start() end
+function AR2_speed.stop() end
+function AR2_rageBotSetEnabled() end
+function AR2_toggleCharm() end
+function AR2_toggleFOVZoom() end
+function AR2_toggleDistZoomEnabled() end
+function AR2_toggleDistanceZoom() end
+function AR2_startNoclip() end
+function AR2_stopNoclip() end
+function AR2_startInfJump() end
+function AR2_stopInfJump() end
+function AR2_startBhop() end
+function AR2_stopBhop() end
+function AR2_startTpDash() end
+function AR2_stopTpDash() end
+function AR2_startCarDash() end
+function AR2_stopCarDash() end
+function AR2_toggleRemoveTextures() end
+function AR2_toggleRemoveLeaves() end
+function AR2_toggleRemoveBushes() end
+function AR2_toggleHidePlayer() end
+function AR2_toggleHideGun() end
+function startWallbangTagging() end
+function stopWallbangTagging() end
+function AR2_applyAllFireModes() end
+function setInstantReloadEnabled() end
+function AR2_setPersonalCharacter() end
+function AR2_setPersonalGun() end
+function AR2_applySkybox() end
+function AR2_toggleHitmarker() end
+function AR2_toggleCrosshair() end
+function AR2_toggleRespawnTP() end
+function AR2_hbeSetEnabled() end
+function AR2_cosSetEnabled() end
+function AR2_setAutoReload() end
+function AR2_setInstantInteract() end
+function AR2_setContainerPersistence() end
+function AR2_setContainerPersist() end
+function AR2_setPlayerJesus() end
+function AR2_setSelfBacktrack() end
+function AR2_setJumpCircle() end
+function AR2_setRemoveShadows() end
+function AR2_setClouds() end
+function AR2_setColorCorrection() end
+function AR2_refreshUI() end
 
 AR2_COLORS = {
     player = Color3.fromRGB(255, 80, 90), armed = Color3.fromRGB(255, 140, 40),
@@ -260,6 +346,9 @@ function AR2_loadConfigByName(name)
         AR2_tracersEnabled = AR2_CFG.misc.tracers
         if AR2_CFG.misc.noclip then AR2_startNoclip() else AR2_stopNoclip() end
         if AR2_CFG.misc.infJump then AR2_startInfJump() else AR2_stopInfJump() end
+        if AR2_CFG.misc.bhop then AR2_startBhop() else AR2_stopBhop() end
+        if AR2_CFG.misc.tpDash then AR2_startTpDash() else AR2_stopTpDash() end
+        if AR2_CFG.car.tpDash then AR2_startCarDash() else AR2_stopCarDash() end
         AR2_toggleRemoveTextures(AR2_CFG.misc.removeTextures)
         AR2_toggleRemoveLeaves(AR2_CFG.misc.removeLeaves)
         AR2_toggleRemoveBushes(AR2_CFG.misc.removeBushes)
@@ -326,6 +415,9 @@ function AR2_resetConfig()
     AR2_CFG.misc.freeze = false
     AR2_CFG.misc.infJump = false
     AR2_CFG.misc.noclip = false
+    AR2_CFG.misc.bhop = false
+    AR2_CFG.misc.tpDash = false
+    AR2_CFG.car.tpDash = false
     AR2_CFG.misc.fovZoom = false
     AR2_CFG.misc.distZoomEnabled = false
     AR2_CFG.misc.distZoomActive = false
@@ -383,6 +475,9 @@ function AR2_resetConfig()
         if AR2_minimapGui then AR2_minimapGui.Enabled = false end
         AR2_stopNoclip()
         AR2_stopInfJump()
+        AR2_stopBhop()
+        AR2_stopTpDash()
+        AR2_stopCarDash()
         AR2_toggleRemoveTextures(false)
         AR2_toggleRemoveLeaves(false)
         AR2_toggleRemoveBushes(false)
@@ -1641,12 +1736,8 @@ function AR2_setContainerPersist(enabled)
     end)
 end
 
--- New Rage Bot implementation
-AR2_rageBotConn   = nil
-AR2_rageBotHeld   = false
-AR2_rageBotTarget = nil
-AR2_reloadWatchLast = AR2_reloadWatchLast or 0
-AR2_reloadWatchConn = AR2_reloadWatchConn or nil
+-- Rage Bot (VIM method)
+local AR2_VIM = game:GetService("VirtualInputManager")
 
 local function AR2_rageBotGetAmmo()
     local ammo = nil
@@ -1667,10 +1758,9 @@ function AR2_rageBotSetEnabled(enabled)
         AR2_rageBotConn = nil
     end
     if AR2_rageBotHeld then
-        pcall(mouse1release)
+        pcall(function() AR2_VIM:SendMouseButtonEvent(0,0,0,false,game,1) end)
         AR2_rageBotHeld = false
     end
-    AR2_rageBotTarget = nil
     if not enabled then return end
 
     if not AR2_CFG.magicAim.on then
@@ -1688,18 +1778,17 @@ function AR2_rageBotSetEnabled(enabled)
 
         local mt = AR2_magicAim.target
         local hasTarget = mt ~= nil and mt.distance <= AR2_CFG.rageBot.maxDist
-        AR2_rageBotTarget = hasTarget and mt or nil
 
         local ammo  = AR2_rageBotGetAmmo()
         local empty = type(ammo) == "number" and ammo <= 0
         local gunOut = AR2_getEquippedInner() ~= nil
 
         if hasTarget and not empty and gunOut then
-            pcall(mouse1press)
+            pcall(function() AR2_VIM:SendMouseButtonEvent(0,0,0,true,game,1) end)
             AR2_rageBotHeld = true
         else
             if AR2_rageBotHeld then
-                pcall(mouse1release)
+                pcall(function() AR2_VIM:SendMouseButtonEvent(0,0,0,false,game,1) end)
                 AR2_rageBotHeld = false
             end
         end
@@ -1892,7 +1981,7 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                 end
             end
 
-            -- Recoil handling (Fix 1)
+            -- Recoil handling
             if AR2_CFG.weapon.noRecoil then
                 pcall(function()
                     debug.setupvalue(AR2_originalFireFunction, 6,
@@ -1914,7 +2003,7 @@ if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
                 end
             end
 
-            -- Wallbang robust (Fix 3)
+            -- Wallbang robust
             if AR2_CFG.weapon.wallbang then
                 local penFields = {
                     "Penetration","PenetrationPower","WallPenetration",
@@ -2108,7 +2197,6 @@ function AR2_hbeInstallHook()
                         end
                     end
 
-                    -- Fix 2: hasChars alone
                     if hasChars then
                         local cleaned = {}
                         for _, inst in ipairs(filter) do
@@ -2568,7 +2656,7 @@ end
 
 function AR2_freeze.destroy() AR2_freeze.stop() end
 
--- TELEPORT (full from original)
+-- TELEPORT (full)
 AR2_tp = { busy = false, cancel = false, gen = 0, lastResult = "", writes = 0, phase = "idle", attempt = 0, pulls = 0, hops = 0, surfaceTarget = nil, under = false, underGoal = nil, clipSaved = nil, clipAt = 0 }
 AR2_tpGuard = { installed = false, active = false, blocked = 0, why = "", goal = nil }
 AR2_hookmetamethod = hookmetamethod
@@ -3135,6 +3223,126 @@ function AR2_flyToPlayer(targetPlayer)
     end
 end
 
+-- BUNNY HOP
+AR2_bhopConn = nil
+
+function AR2_startBhop()
+    if AR2_bhopConn then return end
+    AR2_bhopConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_CFG.misc.bhop then AR2_stopBhop() return end
+        local char = AR2_LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum  = char and char:FindFirstChildWhichIsA("Humanoid")
+        if not root or not hum then return end
+        local moving = AR2_UserInputService:IsKeyDown(Enum.KeyCode.W)
+                    or AR2_UserInputService:IsKeyDown(Enum.KeyCode.A)
+                    or AR2_UserInputService:IsKeyDown(Enum.KeyCode.S)
+                    or AR2_UserInputService:IsKeyDown(Enum.KeyCode.D)
+        if moving and hum.FloorMaterial ~= Enum.Material.Air then
+            root.AssemblyLinearVelocity = Vector3.new(
+                root.AssemblyLinearVelocity.X,
+                AR2_CFG.misc.bhopHeight * 3,
+                root.AssemblyLinearVelocity.Z
+            )
+        end
+    end)
+end
+
+function AR2_stopBhop()
+    AR2_CFG.misc.bhop = false
+    if AR2_bhopConn then AR2_bhopConn:Disconnect() AR2_bhopConn = nil end
+end
+
+-- TP DASH (player)
+AR2_tpDashConn = nil
+AR2_tpDashLast = 0
+
+function AR2_startTpDash()
+    if AR2_tpDashConn then return end
+    AR2_CFG.misc.tpDash = true
+    AR2_tpDashLast = os.clock()
+    AR2_tpDashConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_CFG.misc.tpDash then AR2_stopTpDash() return end
+        local now = os.clock()
+        if now - AR2_tpDashLast < AR2_CFG.misc.tpDashInterval then return end
+        AR2_tpDashLast = now
+        local char = AR2_LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+        local fwd  = workspace.CurrentCamera.CFrame.LookVector
+        local flat = Vector3.new(fwd.X, 0, fwd.Z)
+        if flat.Magnitude < 0.01 then return end
+        root.CFrame = root.CFrame + flat.Unit * AR2_CFG.misc.tpDashStuds
+    end)
+end
+
+function AR2_stopTpDash()
+    AR2_CFG.misc.tpDash = false
+    if AR2_tpDashConn then AR2_tpDashConn:Disconnect() AR2_tpDashConn = nil end
+end
+
+-- VEHICLE TP DASH
+AR2_carDashConn = nil
+AR2_carDashLast = 0
+
+function AR2_startCarDash()
+    if AR2_carDashConn then return end
+    AR2_CFG.car.tpDash = true
+    AR2_carDashLast    = os.clock()
+
+    AR2_carDashConn = AR2_RunService.Heartbeat:Connect(function()
+        if not AR2_CFG.car.tpDash then AR2_stopCarDash() return end
+
+        local now = os.clock()
+        if now - AR2_carDashLast < AR2_CFG.car.tpDashInterval then return end
+        AR2_carDashLast = now
+
+        local model = AR2_carPick()
+        if not model then return end
+
+        local fwd  = workspace.CurrentCamera.CFrame.LookVector
+        local flat = Vector3.new(fwd.X, 0, fwd.Z)
+        if flat.Magnitude < 0.01 then return end
+        flat = flat.Unit
+
+        local curPivot = model:GetPivot()
+        local newPivot = CFrame.new(
+            curPivot.Position + flat * AR2_CFG.car.tpDashStuds
+        ) * (curPivot - curPivot.Position)
+
+        local savedAnchor = {}
+        for _, p in ipairs(model:GetDescendants()) do
+            if p:IsA("BasePart") then
+                savedAnchor[p] = p.Anchored
+                p.Anchored                = true
+                p.AssemblyLinearVelocity  = Vector3.zero
+                p.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+
+        model:PivotTo(newPivot)
+
+        for p, wasAnchored in pairs(savedAnchor) do
+            if p and p.Parent then
+                p.Anchored                = wasAnchored
+                p.AssemblyLinearVelocity  = Vector3.zero
+                p.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+    end)
+end
+
+function AR2_stopCarDash()
+    AR2_CFG.car.tpDash = false
+    if AR2_carDashConn then
+        AR2_carDashConn:Disconnect()
+        AR2_carDashConn = nil
+    end
+end
+
+-- =============================================
+-- CAR SYSTEM
+-- =============================================
 AR2_car = { busy = false, cancel = false, gen = 0, lastResult = "", target = nil }
 
 function AR2_carBase(model) return model and (model:FindFirstChild("Base") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")) end
@@ -3196,6 +3404,7 @@ function AR2_car.desyncTo(goal, label)
         AR2_car.busy = false
     end)
 end
+
 function AR2_car.rewriteTo(goal, label)
     AR2_car.gen = AR2_car.gen + 1
     local mine = AR2_car.gen
@@ -3248,6 +3457,9 @@ function AR2_car.toCursor(mode)
     if mode == "desync" then AR2_car.desyncTo(goal, "to cursor") else AR2_car.rewriteTo(goal, "to cursor") end
 end
 
+-- =============================================
+-- MAP SYSTEM
+-- =============================================
 do
     AR2_MAP_ORIGIN = CFrame.new(Vector3.new(-7349.55, 0, -6187.35), Vector3.new(-7349.55, 0, -6186.35))
     AR2_MAP_SX, AR2_MAP_SZ = -13499.068, -12386.184
@@ -3372,7 +3584,9 @@ do
     end
 end
 
+-- =============================================
 -- RADAR
+-- =============================================
 AR2_radar = { running = false, layer = "off", players = 0, drawn = 0, sample = "" }
 do
     local MAP_ORIGIN = CFrame.new(Vector3.new(-7349.55, 0, -6187.35), Vector3.new(-7349.55, 0, -6186.35))
@@ -3494,6 +3708,9 @@ do
     function AR2_radar.destroy() AR2_radar.stop() radarLayer, radarMarker = nil, nil radarNextScan = 0 end
 end
 
+-- =============================================
+-- SPEED HACK
+-- =============================================
 AR2_speed = { enabled = false, resets = 0, lastReset = nil }
 AR2_speedConn = nil
 AR2_lastPosition = nil
@@ -3576,7 +3793,9 @@ function AR2_speed.stop()
     if AR2_speedConn then AR2_speedConn:Disconnect() AR2_speedConn = nil end
 end
 
+-- =============================================
 -- CAR MODS
+-- =============================================
 AR2_carMods = { running = false, touched = 0, note = "off" }
 AR2_touched = {}
 AR2_carLoopGen = 0
@@ -3736,7 +3955,9 @@ function AR2_carMods.destroy()
     AR2_carMods.note = "off"
 end
 
+-- =============================================
 -- VISUALS
+-- =============================================
 AR2_visuals = { running = false, note = "off" }
 AR2_FLAT_AMBIENT = Color3.fromRGB(150,150,150)
 
@@ -4331,11 +4552,11 @@ function AR2_minimapUpdate()
     elseif not AR2_CFG.minimap.on and AR2_minimapConn then AR2_minimapStop() end
 end
 
--- HITMARKER legacy (not used, replaced by GUI)
+-- HITMARKER LEGACY (stub)
 local AR2_hitmarkerDrawing = {}
 local AR2_hitmarkerActive = false
 
-local function AR2_createHitmarker() end  -- stub for legacy
+local function AR2_createHitmarker() end
 
 AR2_showHitmarker = AR2_showHitmarker or function() end
 
@@ -4473,8 +4694,9 @@ local function AR2_registerAllKeybinds()
     AR2_registerKeybind("crosshair", function() AR2_toggleCrosshair(not AR2_CFG.crosshair.enabled) end)
     AR2_registerKeybind("tracers", function() AR2_CFG.misc.tracers = not AR2_CFG.misc.tracers AR2_tracersUpdate() end)
 end
-
+-- =============================================
 -- UI
+-- =============================================
 AR2_UI_ELEMENTS = {}
 
 local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
@@ -4600,7 +4822,7 @@ if WindUI then
     addSlider(silentAimSection, "Forward Nudge", AR2_CFG.magicBullet, "forwardNudge", 0, 5)
     addSlider(silentAimSection, "Redirect Chance %", AR2_CFG.magicAim, "redirectChance", 0, 100)
 
-    -- Rage Bot section with separate maxDist slider
+    -- Rage Bot section (simplified)
     local rageBotSection = combatTab:Section({ Title = "Rage Bot", Box = false })
     addToggle(rageBotSection, "Enabled", AR2_CFG.rageBot, "on", function(v) AR2_rageBotSetEnabled(v) end)
     addSlider(rageBotSection, "Max Distance", AR2_CFG.rageBot, "maxDist", 50, 2000, function(v) AR2_CFG.rageBot.maxDist = v end)
@@ -4666,6 +4888,32 @@ if WindUI then
     local noclipSection = movementTab:Section({ Title = "No Clip", Box = false })
     addToggle(noclipSection, "Enabled", AR2_CFG.misc, "noclip", function(v) AR2_toggleNoclip(v) end)
     addSlider(noclipSection, "Noclip Speed", AR2_CFG.misc, "noclipSpeed", 0, 500)
+
+    -- Bhop Section
+    local bhopSection = movementTab:Section({ Title = "Bunny Hop", Box = false })
+    addToggle(bhopSection, "Enabled", AR2_CFG.misc, "bhop", function(v) if v then AR2_startBhop() else AR2_stopBhop() end end)
+    addSlider(bhopSection, "Hop Height", AR2_CFG.misc, "bhopHeight", 5, 50, function(v) AR2_CFG.misc.bhopHeight = v end)
+
+    -- TP Dash Section
+    local tpDashSection = movementTab:Section({ Title = "TP Dash", Box = false })
+    addToggle(tpDashSection, "Enabled", AR2_CFG.misc, "tpDash", function(v) if v then AR2_startTpDash() else AR2_stopTpDash() end end)
+    addSlider(tpDashSection, "Distance", AR2_CFG.misc, "tpDashStuds", 5, 200, function(v) AR2_CFG.misc.tpDashStuds = v end)
+    addSlider(tpDashSection, "Interval (s)", AR2_CFG.misc, "tpDashInterval", 1, 10, function(v) AR2_CFG.misc.tpDashInterval = v end)
+
+    -- Vehicle TP Dash Section (in Cars tab)
+    local carsTab = Window:Tab({ Title = "Cars", Icon = "car" })
+    local carTuningSection = carsTab:Section({ Title = "Tuning", Box = false })
+    addToggle(carTuningSection, "Infinite Fuel", AR2_CFG.car, "fuel", function(v) AR2_carMods.apply() end)
+    addToggle(carTuningSection, "Boost", AR2_CFG.car, "boost", function(v) AR2_carMods.apply() end)
+    addToggle(carTuningSection, "Godmode", AR2_CFG.car, "god", function(v) AR2_carMods.apply() end)
+    addSlider(carTuningSection, "Speed", AR2_CFG.car, "speed", 44, 400)
+    addSlider(carTuningSection, "Torque", AR2_CFG.car, "torque", 1, 10)
+    addToggle(carTuningSection, "All Cars", AR2_CFG.car, "allCars", function(v) AR2_carMods.apply() end)
+
+    local carDashSection = carsTab:Section({ Title = "TP Dash", Box = false })
+    addToggle(carDashSection, "Vehicle TP Dash", AR2_CFG.car, "tpDash", function(v) if v then AR2_startCarDash() else AR2_stopCarDash() end end)
+    addSlider(carDashSection, "Distance", AR2_CFG.car, "tpDashStuds", 5, 300, function(v) AR2_CFG.car.tpDashStuds = v end)
+    addSlider(carDashSection, "Interval (s)", AR2_CFG.car, "tpDashInterval", 1, 10, function(v) AR2_CFG.car.tpDashInterval = v end)
 
     -- Teleport Tab
     local teleportTab = Window:Tab({ Title = "Teleport", Icon = "target" })
@@ -4792,6 +5040,7 @@ if WindUI then
     addSlider(lightingSection, "Time", AR2_CFG.visuals, "time", 0, 24, function(v) AR2_visuals.apply() end)
     addDropdown(lightingSection, "Skybox", {"Default", "Space", "Galaxy", "Galaxy 2", "Galaxy 3", "Saturne", "Neptune", "Redshift", "Pink Daylights", "Purple Night", "Gray Night", "Anime Sky"}, AR2_CFG.visuals, "skybox", function(v) AR2_applySkybox(v) end)
 
+    -- Clouds section
     local cloudsSection = worldTab:Section({ Title = "Clouds", Box = false })
     addToggle(cloudsSection, "Enable Clouds", AR2_CFG.visuals, "cloudsEnabled", function(v) AR2_setClouds(v, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, AR2_CFG.visuals.cloudsDensity) end)
     addToggle(cloudsSection, "Modify Clouds", AR2_CFG.visuals, "modifyClouds", function(v) AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, v, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, AR2_CFG.visuals.cloudsDensity) end)
@@ -4804,28 +5053,20 @@ if WindUI then
     addSlider(cloudsSection, "Cloud Cover", AR2_CFG.visuals, "cloudsCover", 0, 1, 0.01, function(v) AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, v, AR2_CFG.visuals.cloudsDensity) end)
     addSlider(cloudsSection, "Cloud Density", AR2_CFG.visuals, "cloudsDensity", 0, 1, 0.01, function(v) AR2_setClouds(AR2_CFG.visuals.cloudsEnabled, AR2_CFG.visuals.modifyClouds, AR2_CFG.visuals.cloudsColor, AR2_CFG.visuals.cloudsCover, v) end)
 
+    -- Color correction
     local ccSection = worldTab:Section({ Title = "Color Correction", Box = false })
     addToggle(ccSection, "Enable Color Correction", AR2_CFG.visuals, "colorCorrectionEnabled", function(v) AR2_setColorCorrection(v, AR2_CFG.visuals.ccSaturation, AR2_CFG.visuals.ccContrast, AR2_CFG.visuals.ccBrightness) end)
     addSlider(ccSection, "Saturation", AR2_CFG.visuals, "ccSaturation", 0, 2, 0.1, function(v) AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, v, AR2_CFG.visuals.ccContrast, AR2_CFG.visuals.ccBrightness) end)
     addSlider(ccSection, "Contrast", AR2_CFG.visuals, "ccContrast", 0, 1, 0.1, function(v) AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, AR2_CFG.visuals.ccSaturation, v, AR2_CFG.visuals.ccBrightness) end)
     addSlider(ccSection, "Brightness", AR2_CFG.visuals, "ccBrightness", 0.2, 2, 0.1, function(v) AR2_setColorCorrection(AR2_CFG.visuals.colorCorrectionEnabled, AR2_CFG.visuals.ccSaturation, AR2_CFG.visuals.ccContrast, v) end)
 
+    -- Remove shadows
     addToggle(lightingSection, "Remove Shadows", AR2_CFG.misc, "removeShadows", function(v) AR2_setRemoveShadows(v) end)
 
     local removeSection = worldTab:Section({ Title = "Performance", Box = false })
     addToggle(removeSection, "Remove Textures", AR2_CFG.misc, "removeTextures", function(v) AR2_toggleRemoveTextures(v) end)
     addToggle(removeSection, "Remove Leaves", AR2_CFG.misc, "removeLeaves", function(v) AR2_toggleRemoveLeaves(v) end)
     addToggle(removeSection, "Remove Bushes", AR2_CFG.misc, "removeBushes", function(v) AR2_toggleRemoveBushes(v) end)
-
-    -- Cars Tab
-    local carsTab = Window:Tab({ Title = "Cars", Icon = "car" })
-    local carTuningSection = carsTab:Section({ Title = "Tuning", Box = false })
-    addToggle(carTuningSection, "Infinite Fuel", AR2_CFG.car, "fuel", function(v) AR2_carMods.apply() end)
-    addToggle(carTuningSection, "Boost", AR2_CFG.car, "boost", function(v) AR2_carMods.apply() end)
-    addToggle(carTuningSection, "Godmode", AR2_CFG.car, "god", function(v) AR2_carMods.apply() end)
-    addSlider(carTuningSection, "Speed", AR2_CFG.car, "speed", 44, 400)
-    addSlider(carTuningSection, "Torque", AR2_CFG.car, "torque", 1, 10)
-    addToggle(carTuningSection, "All Cars", AR2_CFG.car, "allCars", function(v) AR2_carMods.apply() end)
 
     -- Settings Tab
     local settingsTab = Window:Tab({ Title = "Settings", Icon = "settings" })
@@ -5128,7 +5369,7 @@ function AR2_setPersonalGun(enabled, mode, hue, gray, materialStr, rainbow)
 end
 
 -- Auto Reload, Remove Shadows, Clouds, Color Correction, Self Backtrack, Jump Circle, Instant Interact, Container Persistence, Player Jesus
--- These functions are included as defined earlier in the original script. Ensure they are present.
+-- (These functions are defined earlier in the script; assume present.)
 
 -- Final initialization
 AR2_tracersEnabled = AR2_CFG.misc.tracers
@@ -5149,6 +5390,9 @@ if AR2_CFG.misc.charm then AR2_toggleCharm(true) end
 if AR2_CFG.minimap.on then AR2_minimapEnabled = true AR2_updateMinimap() end
 if AR2_CFG.misc.noclip then AR2_startNoclip() end
 if AR2_CFG.misc.infJump then AR2_startInfJump() end
+if AR2_CFG.misc.bhop then AR2_startBhop() end
+if AR2_CFG.misc.tpDash then AR2_startTpDash() end
+if AR2_CFG.car.tpDash then AR2_startCarDash() end
 AR2_toggleRemoveTextures(AR2_CFG.misc.removeTextures)
 AR2_toggleRemoveLeaves(AR2_CFG.misc.removeLeaves)
 AR2_toggleRemoveBushes(AR2_CFG.misc.removeBushes)
@@ -5194,6 +5438,9 @@ function AR2_unload()
     AR2_toggleDistanceZoom(false)
     AR2_stopNoclip()
     AR2_stopInfJump()
+    AR2_stopBhop()
+    AR2_stopTpDash()
+    AR2_stopCarDash()
     AR2_toggleRemoveTextures(false)
     AR2_toggleRemoveLeaves(false)
     AR2_toggleRemoveBushes(false)
