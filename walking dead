@@ -1,0 +1,569 @@
+-- =============================================
+-- TWD v13 — single hook silent aim + fullbright + camera no-recoil
+-- Kill Roblox fully, rejoin, then paste.
+-- =============================================
+if getgenv and getgenv().__twd_v13 then
+    warn("[test] already loaded — kill Roblox and reopen")
+    return
+end
+if getgenv then getgenv().__twd_v13 = true end
+
+local Players   = game:GetService("Players")
+local RS        = game:GetService("ReplicatedStorage")
+local Lighting  = game:GetService("Lighting")
+local RunSvc    = game:GetService("RunService")
+local UIS       = game:GetService("UserInputService")
+local LP        = Players.LocalPlayer
+local Cam       = workspace.CurrentCamera
+
+local cfg = {
+    esp=true, boxes=true, names=true, distances=true,
+    silentAim=true,
+    aimMode = "Both",
+    fovCircle=true, lockLine=true,
+    fov=250,
+    fullbright = false,
+    noRecoil   = false,
+    noclip     = false,
+    noclipSpeed = 90,
+}
+
+-- =============================================
+-- DRAWINGS
+-- =============================================
+local fovCircle = Drawing.new("Circle")
+fovCircle.Thickness, fovCircle.Filled, fovCircle.Transparency = 1, false, 1
+fovCircle.NumSides, fovCircle.Color, fovCircle.Visible = 64, Color3.fromRGB(255,90,90), false
+
+local lockLine = Drawing.new("Line")
+lockLine.Thickness, lockLine.Transparency = 2, 1
+lockLine.Color, lockLine.Visible = Color3.fromRGB(255,90,90), false
+
+local pool = {}
+local function getEsp(i)
+    if not pool[i] then
+        local box = Drawing.new("Square")
+        box.Thickness, box.Filled, box.Transparency = 1, false, 1
+        box.Color, box.Visible = Color3.fromRGB(255,90,90), false
+        local nm = Drawing.new("Text")
+        nm.Size, nm.Center, nm.Outline = 13, true, true
+        nm.Color, nm.Visible = Color3.fromRGB(255,255,255), false
+        local ds = Drawing.new("Text")
+        ds.Size, ds.Center, ds.Outline = 12, true, true
+        ds.Color, ds.Visible = Color3.fromRGB(200,200,200), false
+        pool[i] = {box=box, name=nm, dist=ds}
+    end
+    return pool[i]
+end
+
+-- =============================================
+-- HELPERS
+-- =============================================
+local function getBox(char)
+    local head = char:FindFirstChild("Head")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not (head and root) then return nil end
+    local topPos = head.Position + Vector3.new(0, head.Size.Y/2 + 0.4, 0)
+    local botPos = Vector3.new(root.Position.X, root.Position.Y - 2.8, root.Position.Z)
+    local top, onTop = Cam:WorldToViewportPoint(topPos)
+    local bot, onBot = Cam:WorldToViewportPoint(botPos)
+    if not (onTop and onBot and top.Z > 0 and bot.Z > 0) then return nil end
+    local h = math.abs(bot.Y - top.Y)
+    if h < 3 or h > 2000 then return nil end
+    return top.X - h/4, top.Y, h/2, h
+end
+
+local function findTarget()
+    local centre = Vector2.new(Cam.ViewportSize.X/2, Cam.ViewportSize.Y/2)
+    local best, bestScore = nil, cfg.fov
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LP and pl.Character then
+            local hum  = pl.Character:FindFirstChildOfClass("Humanoid")
+            local head = pl.Character:FindFirstChild("Head")
+            if hum and hum.Health > 0 and head then
+                local sp, onScr = Cam:WorldToViewportPoint(head.Position)
+                if onScr and sp.Z > 0 then
+                    local flat = (Vector2.new(sp.X, sp.Y) - centre).Magnitude
+                    if flat < bestScore then bestScore, best = flat, head end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- =============================================
+-- SILENT AIM — SINGLE hook, matches log-only pattern
+-- =============================================
+local Fire = RS.CLIENT_REMOTES.GUN_REMOTES.Fire
+
+local old
+old = hookmetamethod(game, "__namecall", function(self, ...)
+    if getnamecallmethod() == "FireServer" and self == Fire and cfg.silentAim and cfg.aimMode ~= "Off" then
+        local args = {...}
+        local data = args[2]
+        if type(data) == "table" then
+            local target = findTarget()
+            if target then
+                local origin = data.PredictedOrigin
+                if typeof(origin) == "Vector3" then
+                    local dir = (target.Position - origin).Unit
+                    if cfg.aimMode == "Directions" or cfg.aimMode == "Both" then
+                        if type(data.Shots) == "table" then
+                            for _, shot in pairs(data.Shots) do
+                                if type(shot.Directions) == "table" then
+                                    for k in pairs(shot.Directions) do
+                                        if typeof(shot.Directions[k]) == "Vector3" then
+                                            shot.Directions[k] = dir
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    if cfg.aimMode == "AimPosition" or cfg.aimMode == "Both" then
+                        data.AimPosition = target.Position
+                    end
+                end
+            end
+        end
+        return old(self, table.unpack(args))
+    end
+    return old(self, ...)
+end)
+
+print("[v13] silent aim installed — mode=" .. cfg.aimMode)
+
+-- =============================================
+-- FULLBRIGHT
+-- =============================================
+local fbState = { enabled = false, saved = nil, addedCC = false, addedBloom = false }
+
+local function saveLighting()
+    if fbState.saved then return end
+    local s = {
+        Brightness = Lighting.Brightness,
+        Ambient = Lighting.Ambient,
+        OutdoorAmbient = Lighting.OutdoorAmbient,
+        GlobalShadows = Lighting.GlobalShadows,
+        ExposureCompensation = Lighting.ExposureCompensation,
+    }
+    local cc = Lighting:FindFirstChildOfClass("ColorCorrectionEffect")
+    if cc then
+        s.CC = { inst = cc, Saturation = cc.Saturation, Contrast = cc.Contrast,
+                 Brightness = cc.Brightness, Enabled = cc.Enabled }
+    end
+    local bloom = Lighting:FindFirstChildOfClass("BloomEffect")
+    if bloom then
+        s.Bloom = { inst = bloom, Intensity = bloom.Intensity, Size = bloom.Size,
+                    Threshold = bloom.Threshold, Enabled = bloom.Enabled }
+    end
+    fbState.saved = s
+end
+
+local function applyFullbright()
+    saveLighting()
+    Lighting.Brightness = 3
+    Lighting.Ambient = Color3.fromRGB(180, 180, 180)
+    Lighting.OutdoorAmbient = Color3.fromRGB(200, 200, 200)
+    Lighting.GlobalShadows = false
+    Lighting.ExposureCompensation = 0.45
+
+    local cc = fbState.saved.CC and fbState.saved.CC.inst or Lighting:FindFirstChildOfClass("ColorCorrectionEffect")
+    if not cc or not cc.Parent then
+        cc = Instance.new("ColorCorrectionEffect")
+        cc.Name = "ar2_cc"
+        cc.Parent = Lighting
+        fbState.addedCC = true
+    end
+    cc.Saturation = 0.25
+    cc.Contrast = 0.10
+    cc.Brightness = 0.02
+    cc.Enabled = true
+
+    local bloom = fbState.saved.Bloom and fbState.saved.Bloom.inst or Lighting:FindFirstChildOfClass("BloomEffect")
+    if not bloom or not bloom.Parent then
+        bloom = Instance.new("BloomEffect")
+        bloom.Name = "ar2_bloom"
+        bloom.Parent = Lighting
+        fbState.addedBloom = true
+    end
+    bloom.Intensity = 0.20
+    bloom.Size = 22
+    bloom.Threshold = 0.95
+    bloom.Enabled = true
+end
+
+local function restoreLighting()
+    local s = fbState.saved
+    if not s then return end
+    Lighting.Brightness = s.Brightness
+    Lighting.Ambient = s.Ambient
+    Lighting.OutdoorAmbient = s.OutdoorAmbient
+    Lighting.GlobalShadows = s.GlobalShadows
+    Lighting.ExposureCompensation = s.ExposureCompensation
+    if fbState.addedCC then
+        local cc = Lighting:FindFirstChild("ar2_cc")
+        if cc then cc:Destroy() end
+        fbState.addedCC = false
+    elseif s.CC and s.CC.inst and s.CC.inst.Parent then
+        s.CC.inst.Saturation = s.CC.Saturation
+        s.CC.inst.Contrast = s.CC.Contrast
+        s.CC.inst.Brightness = s.CC.Brightness
+        s.CC.inst.Enabled = s.CC.Enabled
+    end
+    if fbState.addedBloom then
+        local b = Lighting:FindFirstChild("ar2_bloom")
+        if b then b:Destroy() end
+        fbState.addedBloom = false
+    elseif s.Bloom and s.Bloom.inst and s.Bloom.inst.Parent then
+        s.Bloom.inst.Intensity = s.Bloom.Intensity
+        s.Bloom.inst.Size = s.Bloom.Size
+        s.Bloom.inst.Threshold = s.Bloom.Threshold
+        s.Bloom.inst.Enabled = s.Bloom.Enabled
+    end
+end
+
+RunSvc.RenderStepped:Connect(function()
+    if fbState.enabled then
+        pcall(applyFullbright)
+    end
+end)
+
+-- =============================================
+-- NO RECOIL — camera pitch watcher (no hooks)
+-- =============================================
+-- Track camera pitch. If it suddenly increases (kicked up) beyond
+-- normal mouse-look speed, undo the change for the next few frames.
+local recoilState = {
+    lastPitch = 0,
+    lastPitchTime = 0,
+    resetUntil = 0,
+    resetPitch = 0,
+    enabled = false,
+}
+
+local function getPitch(cf)
+    return math.asin(math.clamp(-cf.LookVector.Y, -1, 1))
+end
+
+RunSvc.RenderStepped:Connect(function()
+    if not cfg.noRecoil then
+        recoilState.lastPitch = getPitch(Cam.CFrame)
+        recoilState.lastPitchTime = tick()
+        return
+    end
+    local curPitch = getPitch(Cam.CFrame)
+    local now = tick()
+    local dt = math.max(now - recoilState.lastPitchTime, 1/240)
+    local pitchDelta = curPitch - recoilState.lastPitch
+
+    -- positive pitch delta = camera pitched up (recoil kick)
+    -- rapid upward change in a single frame is almost certainly recoil
+    if pitchDelta > 0 and pitchDelta / dt > 3.0 then
+        -- kick detected: remember pitch to reset to
+        recoilState.resetPitch = recoilState.lastPitch
+        recoilState.resetUntil = now + 0.25
+    end
+
+    if now < recoilState.resetUntil then
+        -- rebuild camera with reset pitch, keep current yaw
+        local curLV = Cam.CFrame.LookVector
+        local yaw = math.atan2(-curLV.X, -curLV.Z)
+        Cam.CFrame = CFrame.new(Cam.CFrame.Position) * CFrame.fromEulerAnglesYXZ(recoilState.resetPitch, yaw, 0)
+        curPitch = recoilState.resetPitch
+    end
+
+    recoilState.lastPitch = curPitch
+    recoilState.lastPitchTime = now
+end)
+
+-- =============================================
+-- NOCLIP
+-- =============================================
+local ncConn, ncRoot, ncHum = nil, nil, nil
+local ncParts, ncOffsets = {}, {}
+local ncKeys = {W=false, A=false, S=false, D=false, Space=false, LeftControl=false}
+
+local function ncStop()
+    cfg.noclip = false
+    if ncConn then ncConn:Disconnect() ncConn = nil end
+    for _, p in ipairs(ncParts) do
+        pcall(function()
+            if p and p.Parent then
+                p.Anchored = false
+                p.Velocity = Vector3.zero
+                p.RotVelocity = Vector3.zero
+            end
+        end)
+    end
+    ncParts, ncOffsets = {}, {}
+    ncRoot, ncHum = nil, nil
+    for k in pairs(ncKeys) do ncKeys[k] = false end
+    local char = LP.Character
+    if char then
+        local h = char:FindFirstChild("Humanoid")
+        if h then h.Sit = false; h.PlatformStand = false end
+    end
+    print("[noclip] stopped")
+end
+
+local function ncStart()
+    if ncConn then return end
+    local char = LP.Character
+    if not char then return end
+    local hum = char:FindFirstChild("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not (hum and root) then return end
+    hum.Sit = true
+    hum.PlatformStand = true
+
+    local parts = {}
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and (obj.Position - root.Position).Magnitude <= 15 then
+            table.insert(parts, obj)
+        end
+    end
+    if #parts == 0 then cfg.noclip = false return end
+    ncOffsets = {}
+    for _, p in ipairs(parts) do
+        ncOffsets[p] = root.CFrame:Inverse() * p.CFrame
+    end
+    ncRoot, ncHum = root, hum
+    ncParts = parts
+    for _, p in ipairs(parts) do p.Anchored = true end
+
+    ncConn = RunSvc.Heartbeat:Connect(function()
+        if not cfg.noclip then ncStop() return end
+        if not ncRoot or not ncRoot.Parent then ncStop() return end
+        local h = LP.Character and LP.Character:FindFirstChild("Humanoid")
+        if h then
+            h.Sit = true
+            h.PlatformStand = true
+        else
+            ncStop() return
+        end
+        local cam = workspace.CurrentCamera
+        local move = Vector3.zero
+        if ncKeys.W then move += cam.CFrame.LookVector end
+        if ncKeys.S then move -= cam.CFrame.LookVector end
+        if ncKeys.D then move += cam.CFrame.RightVector end
+        if ncKeys.A then move -= cam.CFrame.RightVector end
+        if ncKeys.Space then move += Vector3.new(0,1,0) end
+        if ncKeys.LeftControl then move -= Vector3.new(0,1,0) end
+        if move.Magnitude > 0 then
+            local delta = move.Unit * (cfg.noclipSpeed or 90) * 0.05
+            local newCF = ncRoot.CFrame + delta
+            ncRoot.CFrame = newCF
+            for p, offset in pairs(ncOffsets) do
+                if p and p.Parent then p.CFrame = newCF * offset end
+            end
+        end
+    end)
+    print("[noclip] started — " .. #parts .. " parts anchored")
+end
+
+UIS.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    local k = input.KeyCode
+    if     k == Enum.KeyCode.W           then ncKeys.W = true
+    elseif k == Enum.KeyCode.A           then ncKeys.A = true
+    elseif k == Enum.KeyCode.S           then ncKeys.S = true
+    elseif k == Enum.KeyCode.D           then ncKeys.D = true
+    elseif k == Enum.KeyCode.Space       then ncKeys.Space = true
+    elseif k == Enum.KeyCode.LeftControl then ncKeys.LeftControl = true
+    end
+end)
+UIS.InputEnded:Connect(function(input, gpe)
+    if gpe then return end
+    local k = input.KeyCode
+    if     k == Enum.KeyCode.W           then ncKeys.W = false
+    elseif k == Enum.KeyCode.A           then ncKeys.A = false
+    elseif k == Enum.KeyCode.S           then ncKeys.S = false
+    elseif k == Enum.KeyCode.D           then ncKeys.D = false
+    elseif k == Enum.KeyCode.Space       then ncKeys.Space = false
+    elseif k == Enum.KeyCode.LeftControl then ncKeys.LeftControl = false
+    end
+end)
+
+-- =============================================
+-- RENDER
+-- =============================================
+RunSvc.RenderStepped:Connect(function()
+    local centre = Vector2.new(Cam.ViewportSize.X/2, Cam.ViewportSize.Y/2)
+    if cfg.fovCircle and cfg.silentAim and cfg.aimMode ~= "Off" then
+        fovCircle.Position = centre
+        fovCircle.Radius = cfg.fov
+        fovCircle.Visible = true
+    else fovCircle.Visible = false end
+    local target = (cfg.silentAim and cfg.lockLine and cfg.aimMode ~= "Off") and findTarget() or nil
+    if target then
+        local sp, onScr = Cam:WorldToViewportPoint(target.Position)
+        if onScr and sp.Z > 0 then
+            lockLine.From = centre
+            lockLine.To = Vector2.new(sp.X, sp.Y)
+            lockLine.Visible = true
+        else lockLine.Visible = false end
+    else lockLine.Visible = false end
+    local slot = 0
+    if cfg.esp then
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl ~= LP and pl.Character then
+                local hum = pl.Character:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    local x, y, w, hh = getBox(pl.Character)
+                    if x then
+                        slot = slot + 1
+                        local e = getEsp(slot)
+                        e.box.Position = Vector2.new(x, y)
+                        e.box.Size = Vector2.new(w, hh)
+                        e.box.Visible = cfg.boxes
+                        local rr = pl.Character.HumanoidRootPart
+                        local d = rr and (rr.Position - Cam.CFrame.Position).Magnitude or 0
+                        e.name.Text = pl.Name
+                        e.name.Position = Vector2.new(x + w/2, y - 16)
+                        e.name.Visible = cfg.names
+                        e.dist.Text = string.format("%.0f", d)
+                        e.dist.Position = Vector2.new(x + w/2, y + hh + 2)
+                        e.dist.Visible = cfg.distances
+                    end
+                end
+            end
+        end
+    end
+    for i = slot + 1, #pool do
+        pool[i].box.Visible = false
+        pool[i].name.Visible = false
+        pool[i].dist.Visible = false
+    end
+end)
+
+-- =============================================
+-- UI
+-- =============================================
+local gui = Instance.new("ScreenGui")
+gui.Name, gui.ResetOnSpawn = "twd_test", false
+gui.Parent = game:GetService("CoreGui")
+local frame = Instance.new("Frame")
+frame.Size = UDim2.fromOffset(280, 570)
+frame.Position = UDim2.fromOffset(20, 60)
+frame.BackgroundColor3 = Color3.fromRGB(15,15,20)
+frame.BorderSizePixel = 0
+frame.Active, frame.Draggable = true, true
+frame.Parent = gui
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+local stroke = Instance.new("UIStroke", frame)
+stroke.Color, stroke.Thickness = Color3.fromRGB(255,100,100), 1.5
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 28)
+title.BackgroundColor3 = Color3.fromRGB(255,100,100)
+title.Text = "TWD v13 — single hook"
+title.Font, title.TextSize = Enum.Font.GothamBold, 12
+title.TextColor3 = Color3.new(0,0,0)
+title.BorderSizePixel = 0
+title.Parent = frame
+Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
+local y = 34
+local function addToggle(label, key, cb)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -20, 0, 26)
+    b.Position = UDim2.fromOffset(10, y)
+    b.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    b.Font, b.TextSize = Enum.Font.Gotham, 12
+    b.BorderSizePixel = 0
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    b.Parent = frame
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+    local pad = Instance.new("UIPadding", b)
+    pad.PaddingLeft = UDim.new(0, 10)
+    local function ref()
+        b.Text = label..": "..(cfg[key] and "ON" or "OFF")
+        b.TextColor3 = cfg[key] and Color3.fromRGB(120,255,120) or Color3.fromRGB(200,200,200)
+    end
+    b.MouseButton1Click:Connect(function()
+        cfg[key] = not cfg[key]
+        ref()
+        if cb then pcall(cb, cfg[key]) end
+    end)
+    ref()
+    y = y + 30
+end
+local function addSlider(label, key, min, max, step)
+    local h = Instance.new("Frame")
+    h.Size = UDim2.new(1, -20, 0, 26)
+    h.Position = UDim2.fromOffset(10, y)
+    h.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    h.BorderSizePixel = 0
+    h.Parent = frame
+    Instance.new("UICorner", h).CornerRadius = UDim.new(0, 5)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -60, 1, 0)
+    l.Position = UDim2.fromOffset(10, 0)
+    l.BackgroundTransparency = 1
+    l.TextColor3 = Color3.fromRGB(230, 230, 230)
+    l.Font, l.TextSize = Enum.Font.Gotham, 12
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = h
+    local function mkBtn(txt, xPos, delta)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.fromOffset(24, 22)
+        b.Position = UDim2.new(1, xPos, 0, 2)
+        b.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+        b.Text = txt
+        b.TextColor3 = Color3.fromRGB(255,255,255)
+        b.Font, b.TextSize = Enum.Font.GothamBold, 14
+        b.BorderSizePixel = 0
+        b.Parent = h
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+        b.MouseButton1Click:Connect(function()
+            cfg[key] = math.clamp(cfg[key] + delta, min, max)
+            l.Text = label..":  "..cfg[key]
+        end)
+    end
+    mkBtn("-", -54, -step)
+    mkBtn("+", -26, step)
+    l.Text = label..":  "..cfg[key]
+    y = y + 30
+end
+
+addToggle("ESP", "esp")
+addToggle("Boxes", "boxes")
+addToggle("Names", "names")
+addToggle("Distances", "distances")
+addToggle("Silent Aim", "silentAim")
+addToggle("FOV Circle", "fovCircle")
+addToggle("Lock Line", "lockLine")
+addSlider("FOV", "fov", 50, 600, 25)
+addToggle("Fullbright", "fullbright", function(v)
+    fbState.enabled = v
+    if v then pcall(applyFullbright) else pcall(restoreLighting) end
+end)
+addToggle("No Recoil", "noRecoil")
+addToggle("Noclip", "noclip", function(v)
+    if v then ncStart() else ncStop() end
+end)
+addSlider("Noclip Speed", "noclipSpeed", 30, 300, 10)
+
+local modeBtn = Instance.new("TextButton")
+modeBtn.Size = UDim2.new(1, -20, 0, 26)
+modeBtn.Position = UDim2.fromOffset(10, y)
+modeBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+modeBtn.TextColor3 = Color3.fromRGB(180, 200, 255)
+modeBtn.Font, modeBtn.TextSize = Enum.Font.Gotham, 12
+modeBtn.TextXAlignment = Enum.TextXAlignment.Left
+modeBtn.BorderSizePixel = 0
+modeBtn.Text = "Aim mode:  " .. cfg.aimMode
+modeBtn.Parent = frame
+Instance.new("UICorner", modeBtn).CornerRadius = UDim.new(0, 5)
+local mp = Instance.new("UIPadding", modeBtn)
+mp.PaddingLeft = UDim.new(0, 10)
+local MODES = {"Both", "Directions", "AimPosition", "Off"}
+local modeIdx = 1
+modeBtn.MouseButton1Click:Connect(function()
+    modeIdx = modeIdx + 1
+    if modeIdx > #MODES then modeIdx = 1 end
+    cfg.aimMode = MODES[modeIdx]
+    modeBtn.Text = "Aim mode:  " .. cfg.aimMode
+end)
+
+print("[v13] loaded")
