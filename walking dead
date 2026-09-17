@@ -1,1334 +1,698 @@
-# Vehicle Systems Extraction — Origin HUB
 
-Below is every vehicle-related system pulled out of the script, organized by feature. Each block lists its dependencies so you can port them cleanly.
+local wallbangTagConn    = nil
+local CharactersFolder   = AR2_Workspace:WaitForChild("Characters", 5)
+local ZombiesFolder      = AR2_Workspace:WaitForChild("Zombies", 5)
+local AR2_wallbangSaved  = {}
+local AR2_WALLBANG_GROUPS = { [7]=true, [8]=true, [9]=true, [11]=true, [17]=true }
+local AR2_wallbangFilterHooked  = false
+local AR2_wallbangRealFilter    = nil
 
----
+-- Bypass is a permanent state while wallbang is enabled.
+AR2_wallbangRaycastBypass = false
 
-## 0. Required Config Stubs
-
-```lua
--- Vehicle config (from AR2_CFG.car)
-AR2_CFG = AR2_CFG or {}
-AR2_CFG.car = {
-    -- tuning mods
-    fuel = false, boost = false, god = false,
-    speed = 120, torque = 3, allCars = false, method = "desync",
-
-    -- TP dash
-    tpDash = false, tpDashStuds = 30, tpDashInterval = 2, tpDashVert = 0,
-
-    -- car fly
-    fly = false, flySpeed = 100,
-
-    -- extra mods
-    boatMode = false, removeDrag = false, fullSteer = false, maxTraction = false,
-
-    -- vehicle noclip
-    noclipSpeed = 90,
-    noclipEjectDelay = 0.6,
-
-    -- vehicle noclip TP
-    noclipTPSpeed = 800,
-    noclipTPVertOffset = 5,
-    noclipTPMaxSeconds = 15,
-}
-
--- Vehicle equip config
-AR2_CFG.weapon = AR2_CFG.weapon or {}
-AR2_CFG.weapon.vehicleEquip = false
-```
-
-**Service aliases used** (already defined in Part 1 of the script):
-
-```lua
-AR2_Players         = game:GetService("Players")
-AR2_Workspace       = game:GetService("Workspace")
-AR2_RunService      = game:GetService("RunService")
-AR2_UserInputService= game:GetService("UserInputService")
-AR2_ReplicatedFirst = game:GetService("ReplicatedFirst")
-AR2_ReplicatedStorage = game:GetService("ReplicatedStorage")
-AR2_LocalPlayer     = AR2_Players.LocalPlayer
-AR2_Vehicles        = AR2_Workspace:WaitForChild("Vehicles", 5)
-```
-
----
-
-## 1. Core Car Helpers
-
-```lua
--- Returns the Base part (or PrimaryPart / first BasePart) of a vehicle model
-function AR2_carBase(model)
-    return model and (model:FindFirstChild("Base")
-        or model.PrimaryPart
-        or model:FindFirstChildWhichIsA("BasePart"))
+-- Time-gate: __namecall hook only intercepts raycasts within this window
+-- after a shot. This keeps UI / lock-on / hover raycasts untouched.
+AR2_hookWindowUntil = 0
+function AR2_extendHookWindow()
+    AR2_hookWindowUntil = os.clock() + 1.5
 end
 
--- Returns the vehicle you're currently seated in, or nearest vehicle within range
-function AR2_carPick()
-    local char = AR2_LocalPlayer.Character
-    local humanoid = char and char:FindFirstChildWhichIsA("Humanoid")
-    local seat = humanoid and humanoid.SeatPart
-    local container = AR2_Workspace:FindFirstChild("Vehicles")
-    if not container then return nil end
-
-    if seat then
-        local node = seat
-        while node and node.Parent do
-            if node.Parent == container then return node end
-            node = node.Parent
+local function isCharacterPart(part)
+    if not part then return false end
+    local parent = part.Parent
+    while parent do
+        if parent:FindFirstChildOfClass("Humanoid") then return true end
+        if parent:IsA("Model")
+        and (parent.Parent == CharactersFolder or parent.Parent == ZombiesFolder) then
+            return true
         end
+        parent = parent.Parent
     end
-
-    local best, bestDist = nil, math.huge
-    local origin = AR2_localPosition()
-    for _, model in ipairs(container:GetChildren()) do
-        if model:IsA("Model") then
-            local base = AR2_carBase(model)
-            if base then
-                local d = (base.Position - origin).Magnitude
-                if d < bestDist then best, bestDist = model, d end
-            end
-        end
-    end
-    return best
+    return false
 end
 
--- Reads the module script inside the vehicle model that holds physics config
-function AR2_carConfig(model)
-    local module = model:FindFirstChild("Config")
-    if not (module and module:IsA("ModuleScript")) then return nil end
-    local ok, tbl = pcall(require, module)
-    return (ok and type(tbl) == "table") and tbl or nil
+local function isCorpsePart(part)
+    if not part then return false end
+    if AR2_Corpses and part:IsDescendantOf(AR2_Corpses) then return true end
+    return false
 end
 
--- Vehicle "owned by me" check (ReceiveAge == 0 means we own it)
-function AR2_car.owned(model)
-    local base = AR2_carBase(model)
-    return base ~= nil and base.ReceiveAge == 0
+local function tagPart(part)
+    if not part:IsA("BasePart") then return end
+    if isCharacterPart(part) then return end
+    if isCorpsePart(part) then return end   -- corpses break game loot UI
+    if AR2_CollectionService:HasTag(part, "Bullets Penetrate") then return end
+    AR2_CollectionService:AddTag(part, "Bullets Penetrate")
 end
 
--- Detects the vehicle the player is physically welded to (custom seats)
-function AR2_occupiedCar()
-    local char = AR2_LocalPlayer.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp or not AR2_Vehicles then return nil end
-
-    -- Weld detection (works with custom seats)
-    for _, model in ipairs(AR2_Vehicles:GetChildren()) do
-        if model:IsA("Model") then
-            for _, part in ipairs(model:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    for _, weld in ipairs(part:GetChildren()) do
-                        if (weld:IsA("Weld") or weld:IsA("WeldConstraint"))
-                        and (weld.Part0 == hrp or weld.Part1 == hrp) then
-                            return model
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- Fallback: nearest vehicle within 12 studs
-    local best, bestDist = nil, 12
-    for _, model in ipairs(AR2_Vehicles:GetChildren()) do
-        if model:IsA("Model") then
-            local base = AR2_carBase(model)
-            if base then
-                local d = (base.Position - hrp.Position).Magnitude
-                if d < bestDist then best = model bestDist = d end
-            end
-        end
-    end
-    return best
-end
-
--- Eject simulation helpers
-function AR2_simulateVehicleExit()
-    local VIM = game:GetService("VirtualInputManager")
-    if not VIM then return end
-    pcall(function() VIM:SendKeyEvent(true,  Enum.KeyCode.Space, false, game) end)
-    task.wait(0.05)
-    pcall(function() VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game) end)
-end
-
-function AR2_ejectFromVehicle()
-    local char = AR2_LocalPlayer.Character
-    if not char then return end
-    local hum = char:FindFirstChildWhichIsA("Humanoid")
-    if not hum then return end
-    if hum.Sit then
-        AR2_simulateVehicleExit()
-        task.wait(0.15)
-    end
-    if hum.Sit then
-        hum.Sit = false
-        pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
-    end
-    for _, p in ipairs(char:GetDescendants()) do
-        if p:IsA("Weld") and (p.Name == "SeatWeld" or p.Name == "SeatWeld1") then
-            p:Destroy()
+local function removeCharacterTags(model)
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") and AR2_CollectionService:HasTag(part, "Bullets Penetrate") then
+            AR2_CollectionService:RemoveTag(part, "Bullets Penetrate")
         end
     end
 end
 
-function AR2_stopVehicleVelocity(model)
-    if not model or not model.Parent then return end
-    for _, p in ipairs(model:GetDescendants()) do
-        if p:IsA("BasePart") then
-            pcall(function()
-                p.AssemblyLinearVelocity = Vector3.zero
-                p.AssemblyAngularVelocity = Vector3.zero
-            end)
-        end
+local function AR2_wallbangForcePart(part)
+    if not part:IsA("BasePart") then return end
+    if isCharacterPart(part) then return end
+    if isCorpsePart(part) then return end
+    local gid = part.CollisionGroupId
+    if AR2_WALLBANG_GROUPS[gid] then
+        AR2_wallbangSaved[part] = gid
+        pcall(function() part.CollisionGroupId = 0 end)
     end
+    tagPart(part)
 end
 
-function AR2_carHealth(model)
-    if not model then return nil end
-    local hp = model:GetAttribute("Health") or model:GetAttribute("health")
-    if hp then return tonumber(hp) end
-    for _, d in ipairs(model:GetDescendants()) do
-        if d:IsA("ValueBase") and (d.Name == "Health" or d.Name == "health") then
-            local h = tonumber(d.Value)
-            if h then return h end
+local function AR2_findRaycasting()
+    local rs     = AR2_ReplicatedStorage
+    local client = rs:FindFirstChild("Client")
+    local libs   = client and client:FindFirstChild("Libraries")
+    local rc     = libs and libs:FindFirstChild("Raycasting")
+    if rc then
+        local ok, mod = pcall(require, rc)
+        if ok and type(mod) == "table" and type(mod.bulletCastLightFilter) == "function" then
+            return mod
         end
+    end
+    local ok2, fw = pcall(function()
+        return require(AR2_ReplicatedFirst:WaitForChild("Framework", 30))
+    end)
+    if ok2 and fw and fw.Libraries and fw.Libraries.Raycasting
+    and type(fw.Libraries.Raycasting.bulletCastLightFilter) == "function" then
+        return fw.Libraries.Raycasting
     end
     return nil
 end
-```
 
----
-
-## 2. Car Tuning Mods (Fuel / Boost / God / Traction)
-
-```lua
-AR2_carMods = { running = false, touched = 0, note = "off" }
-AR2_touched  = {}
-AR2_carLoopGen = 0
-
--- Recursive walker over DamageModifiers tables in cfg.Health
-function AR2_forEachDamageMod(cfg, fn)
-    if type(cfg.Health) ~= "table" then return end
-    for _, group in pairs(cfg.Health) do
-        if type(group) == "table" and type(group.DamageModifiers) == "table" then
-            for key in pairs(group.DamageModifiers) do fn(group.DamageModifiers, key) end
-        end
-        if type(group) == "table" and not group.DamageModifiers then
-            for _, sub in pairs(group) do
-                if type(sub) == "table" and type(sub.DamageModifiers) == "table" then
-                    for key in pairs(sub.DamageModifiers) do fn(sub.DamageModifiers, key) end
-                end
-            end
-        end
-    end
-end
-
--- Snapshots the original values before modifying
-function AR2_snapshot(cfg)
-    if AR2_touched[cfg] then return AR2_touched[cfg] end
-    local saved = { torques = {}, grips = {}, dmg = {} }
-    if type(cfg.Fuel) == "table" then saved.burnRate = cfg.Fuel.BurnRate end
-    if type(cfg.Physics) == "table" then
-        saved.driveSpeed   = cfg.Physics.DriveSpeed
-        saved.reverseSpeed = cfg.Physics.ReverseSpeed
-
-        if type(cfg.Physics.Wheels) == "table" then
-            for name, wheel in pairs(cfg.Physics.Wheels) do
-                if type(wheel) == "table"
-                   and type(wheel.Shock) == "table"
-                   and wheel.Shock.DriveMotorTorque then
-                    saved.torques[name] = wheel.Shock.DriveMotorTorque
-                end
-            end
-        end
-
-        if type(cfg.Physics.MaterialGrip) == "table" then
-            for name, material in pairs(cfg.Physics.MaterialGrip) do
-                if type(material) == "table" then
-                    saved.grips[name] = {
-                        Speed    = material.Speed,
-                        Friction = material.Friction,
-                    }
-                end
-            end
-        end
-    end
-    if type(cfg.ExitDamage) == "table" then saved.exitMax = cfg.ExitDamage.MaxSpeed end
-    AR2_forEachDamageMod(cfg, function(t, k) saved.dmg[#saved.dmg+1] = { t = t, k = k, v = t[k] } end)
-    AR2_touched[cfg] = saved
-    return saved
-end
-
-function AR2_applyTo(cfg, model)
-    local c = AR2_CFG.car
-    local saved = AR2_snapshot(cfg)
-
-    -- BOOST
-    if c.boost and type(cfg.Physics) == "table" then
-        cfg.Physics.DriveSpeed   = c.speed
-        cfg.Physics.ReverseSpeed = math.floor(c.speed * 0.4)
-
-        if type(cfg.Physics.Wheels) == "table" then
-            for name, wheel in pairs(cfg.Physics.Wheels) do
-                if type(wheel) == "table"
-                   and type(wheel.Shock) == "table"
-                   and saved.torques[name] then
-                    wheel.Shock.DriveMotorTorque = saved.torques[name] * c.torque
-                end
-            end
-        end
-
-        if type(cfg.ExitDamage) == "table" then
-            cfg.ExitDamage.MaxSpeed = 99999
-        end
-    end
-
-    -- MAX TRACTION
-    if c.maxTraction and type(cfg.Physics) == "table"
-       and type(cfg.Physics.MaterialGrip) == "table" then
-        for _, mat in pairs(cfg.Physics.MaterialGrip) do
-            if type(mat) == "table" then
-                if mat.Speed    ~= nil then mat.Speed    = 1 end
-                if mat.Friction ~= nil then mat.Friction = 1 end
-            end
-        end
-    end
-
-    -- INFINITE FUEL
-    if c.fuel and type(cfg.Fuel) == "table" then
-        cfg.Fuel.BurnRate        = 0
-        cfg.Fuel.ConsumptionRate = 0
-    end
-
-    -- GODMODE
-    if c.god and type(cfg.Health) == "table" then
-        local function zeroDmg(t)
-            if type(t) ~= "table" then return end
-            if type(t.DamageModifiers) == "table" then
-                for k in pairs(t.DamageModifiers) do
-                    t.DamageModifiers[k] = 0
-                end
-            else
-                for _, v in pairs(t) do zeroDmg(v) end
-            end
-        end
-        zeroDmg(cfg.Health)
-    end
-end
-
-function AR2_restoreOne(cfg)
-    local saved = AR2_touched[cfg]
-    if not saved then return end
-    if type(cfg.Fuel) == "table" and saved.burnRate ~= nil then cfg.Fuel.BurnRate = saved.burnRate end
-    if type(cfg.Physics) == "table" then
-        if saved.driveSpeed   ~= nil then cfg.Physics.DriveSpeed   = saved.driveSpeed end
-        if saved.reverseSpeed ~= nil then cfg.Physics.ReverseSpeed = saved.reverseSpeed end
-
-        if type(cfg.Physics.Wheels) == "table" then
-            for name, wheel in pairs(cfg.Physics.Wheels) do
-                if type(wheel) == "table"
-                   and type(wheel.Shock) == "table"
-                   and saved.torques[name] then
-                    wheel.Shock.DriveMotorTorque = saved.torques[name]
-                end
-            end
-        end
-
-        if type(cfg.Physics.MaterialGrip) == "table" then
-            for name, material in pairs(cfg.Physics.MaterialGrip) do
-                if type(material) == "table" and saved.grips[name] then
-                    if saved.grips[name].Speed    ~= nil then material.Speed    = saved.grips[name].Speed    end
-                    if saved.grips[name].Friction ~= nil then material.Friction = saved.grips[name].Friction end
-                end
-            end
-        end
-    end
-    if type(cfg.ExitDamage) == "table" and saved.exitMax ~= nil then cfg.ExitDamage.MaxSpeed = saved.exitMax end
-    for _, entry in ipairs(saved.dmg) do entry.t[entry.k] = entry.v end
-    AR2_touched[cfg] = nil
-end
-
-function AR2_restoreAll()
-    for cfg in pairs(AR2_touched) do AR2_restoreOne(cfg) end
-    AR2_carMods.touched = 0
-end
-
--- One sweep pass — applies mods to occupied car or all cars
-function AR2_sweep()
-    if not AR2_Vehicles or not AR2_Vehicles.Parent then
-        AR2_Vehicles = AR2_Workspace:FindFirstChild("Vehicles")
-    end
-    if not AR2_Vehicles then AR2_carMods.note = "no Vehicles folder" return end
-    local count = 0
-    if AR2_CFG.car.allCars then
-        for _, model in ipairs(AR2_Vehicles:GetChildren()) do
-            if model:IsA("Model") then
-                local cfg = AR2_carConfig(model)
-                if cfg then AR2_applyTo(cfg, model) count = count + 1 end
-            end
-        end
-    else
-        local model = AR2_occupiedCar()
-        local cfg = model and AR2_carConfig(model)
-        if cfg then AR2_applyTo(cfg, model) count = count + 1 end
-    end
-    AR2_carMods.touched = count
-    local parts_ = {}
-    if AR2_CFG.car.fuel        then parts_[#parts_+1] = "fuel" end
-    if AR2_CFG.car.boost       then parts_[#parts_+1] = "boost" end
-    if AR2_CFG.car.god         then parts_[#parts_+1] = "god" end
-    if AR2_CFG.car.maxTraction then parts_[#parts_+1] = "traction" end
-    AR2_carMods.note = string.format("%s  --  %d car%s tuned%s",
-        table.concat(parts_, ", "), count, count == 1 and "" or "s",
-        AR2_CFG.car.allCars and "  (all)" or "  (yours)")
-end
-
-function AR2_carMods.apply()
-    local wanted = AR2_CFG.car.fuel or AR2_CFG.car.boost
-        or AR2_CFG.car.god or AR2_CFG.car.maxTraction
-    AR2_restoreAll()
-    AR2_carLoopGen = AR2_carLoopGen + 1
-    if not wanted then
-        AR2_carMods.running = false
-        AR2_carMods.note = "off"
+local function AR2_installWallbangFilterHook()
+    if AR2_wallbangFilterHooked then return end
+    if type(hookfunction) ~= "function" then
+        warn("[wallbang] hookfunction unavailable — filter layer skipped")
         return
     end
-    AR2_carMods.running = true
-    pcall(AR2_sweep)
-    local mine = AR2_carLoopGen
-    task.spawn(function()
-        while mine == AR2_carLoopGen and AR2_carMods.running do
-            task.wait(1)
-            if mine ~= AR2_carLoopGen then break end
-            pcall(AR2_sweep)
-        end
-    end)
-end
-
-function AR2_carMods.destroy()
-    AR2_carLoopGen = AR2_carLoopGen + 1
-    AR2_carMods.running = false
-    AR2_restoreAll()
-    AR2_carMods.note = "off"
-end
-```
-
----
-
-## 3. Extra Vehicle Mods — Boat Mode / Remove Drag / Full Steer
-
-```lua
--- ---------- BOAT MODE ----------
--- Swaps water tags so cars can drive on water
-function AR2_setBoatMode(enabled)
-    AR2_CFG.car.boatMode = enabled
-    local waterFolder = AR2_Workspace:FindFirstChild("Map")
-        and AR2_Workspace.Map:FindFirstChild("Water")
-        or  AR2_Workspace:FindFirstChild("Water")
-    if not waterFolder then return end
-    for _, part in ipairs(waterFolder:GetDescendants()) do
-        if part:IsA("BasePart") or part:IsA("MeshPart") then
-            if enabled then
-                if part:HasTag("Swim Surface") then
-                    part:RemoveTag("Swim Surface")
-                    part:AddTag("Boat Surface")
-                end
-            else
-                if part:HasTag("Boat Surface") then
-                    part:RemoveTag("Boat Surface")
-                    part:AddTag("Swim Surface")
-                end
-            end
-        end
+    local Raycasting = AR2_findRaycasting()
+    if not Raycasting then
+        warn("[wallbang] Raycasting.bulletCastLightFilter not found")
+        return
     end
-end
-
--- ---------- REMOVE DRAG ----------
--- Sets material grip Speed/Friction to 1 and wheel Elasticity to 0
-AR2_dragSaved   = {}
-AR2_dragVehicle = nil
-
-function AR2_setRemoveDrag(enabled)
-    AR2_CFG.car.removeDrag = enabled
-    local model = AR2_carPick()
-    if not model then return end
-    local cfg = AR2_carConfig(model)
-    if not cfg then return end
-
-    if enabled then
-        AR2_dragSaved   = {}
-        AR2_dragVehicle = model
-        if type(cfg.Physics) == "table" then
-            if type(cfg.Physics.MaterialGrip) == "table" then
-                for matName, mat in pairs(cfg.Physics.MaterialGrip) do
-                    if type(mat) == "table" then
-                        if mat.Speed ~= nil then
-                            AR2_dragSaved["gs_"..matName] = mat.Speed
-                            mat.Speed = 1
-                        end
-                        if mat.Friction ~= nil then
-                            AR2_dragSaved["gf_"..matName] = mat.Friction
-                            mat.Friction = 1
-                        end
-                    end
-                end
+    AR2_wallbangRealFilter = hookfunction(Raycasting.bulletCastLightFilter,
+        function(instance, ...)
+            if AR2_CFG.weapon.wallbang then
+                if isCharacterPart(instance) then return false end
+                return true
             end
-            if type(cfg.Physics.Wheels) == "table" then
-                for wname, wheel in pairs(cfg.Physics.Wheels) do
-                    if type(wheel) == "table" then
-                        if wheel.Elasticity ~= nil then
-                            AR2_dragSaved["we_"..tostring(wname)] = wheel.Elasticity
-                            wheel.Elasticity = 0
-                        end
-                        if wheel.Friction ~= nil then
-                            AR2_dragSaved["wf_"..tostring(wname)] = wheel.Friction
-                            wheel.Friction = 1
-                        end
-                    end
-                end
-            end
-        end
-    else
-        if AR2_dragVehicle then
-            local cfgOld = AR2_carConfig(AR2_dragVehicle)
-            if cfgOld and cfgOld.Physics then
-                if type(cfgOld.Physics.MaterialGrip) == "table" then
-                    for matName, mat in pairs(cfgOld.Physics.MaterialGrip) do
-                        if type(mat) == "table" then
-                            if AR2_dragSaved["gs_"..matName] then mat.Speed    = AR2_dragSaved["gs_"..matName] end
-                            if AR2_dragSaved["gf_"..matName] then mat.Friction = AR2_dragSaved["gf_"..matName] end
-                        end
-                    end
-                end
-                if type(cfgOld.Physics.Wheels) == "table" then
-                    for wname, wheel in pairs(cfgOld.Physics.Wheels) do
-                        if type(wheel) == "table" then
-                            local we = AR2_dragSaved["we_"..tostring(wname)]
-                            local wf = AR2_dragSaved["wf_"..tostring(wname)]
-                            if we then wheel.Elasticity = we end
-                            if wf then wheel.Friction   = wf end
-                        end
-                    end
-                end
-            end
-        end
-        AR2_dragSaved, AR2_dragVehicle = {}, nil
-    end
-end
-
--- ---------- FULL STEER ----------
--- Increases steer angle limits to ±45 and disables the gradual-steering fade
-AR2_steerSaved   = {}
-AR2_steerApplied = false
-AR2_steerConn    = nil
-
-function AR2_setFullSteer(enabled)
-    AR2_CFG.car.fullSteer = enabled
-    if enabled then
-        if AR2_steerConn then return end
-        AR2_steerConn = AR2_RunService.Heartbeat:Connect(function()
-            if not AR2_CFG.car.fullSteer then return end
-            local model = AR2_carPick()
-            if not model then return end
-            local cfg = AR2_carConfig(model)
-            if not cfg or not cfg.Physics then return end
-
-            if not AR2_steerApplied then
-                AR2_steerApplied = true
-                for _, k in ipairs({"FullSteeringUntil","NoSteeringAfter",
-                                    "SteerResponce","TurnSpeed"}) do
-                    if cfg.Physics[k] ~= nil then AR2_steerSaved[k] = cfg.Physics[k] end
-                end
-                if type(cfg.Physics.Wheels) == "table" then
-                    for wname, wheel in pairs(cfg.Physics.Wheels) do
-                        if type(wheel) == "table" and wheel.SteerAngle ~= nil then
-                            AR2_steerSaved["sa_"..tostring(wname)] = wheel.SteerAngle
-                        end
-                    end
-                end
-            end
-
-            if cfg.Physics.FullSteeringUntil ~= nil then cfg.Physics.FullSteeringUntil = 9999 end
-            if cfg.Physics.NoSteeringAfter   ~= nil then cfg.Physics.NoSteeringAfter   = 99999 end
-            if cfg.Physics.SteerResponce     ~= nil then
-                cfg.Physics.SteerResponce = math.max(8, cfg.Physics.SteerResponce)
-            end
-
-            if type(cfg.Physics.Wheels) == "table" then
-                for wname, wheel in pairs(cfg.Physics.Wheels) do
-                    if type(wheel) == "table" and wheel.SteerAngle ~= nil then
-                        local orig = AR2_steerSaved["sa_"..tostring(wname)] or 0
-                        if orig > 0 then wheel.SteerAngle = math.max(orig, 45)
-                        elseif orig < 0 then wheel.SteerAngle = math.min(orig, -45) end
-                    end
-                end
-            end
+            return AR2_wallbangRealFilter(instance, ...)
         end)
+    AR2_wallbangFilterHooked = true
+    print("[wallbang] filter hook installed")
+end
+
+function startWallbangTagging()
+    AR2_installWallbangFilterHook()
+    if wallbangTagConn then return end
+    for _, part in ipairs(AR2_Workspace:GetDescendants()) do AR2_wallbangForcePart(part) end
+    local mapFolder = AR2_Workspace:FindFirstChild("Map")
+    if mapFolder then
+        for _, desc in ipairs(mapFolder:GetDescendants()) do AR2_wallbangForcePart(desc) end
+    end
+    wallbangTagConn = AR2_Workspace.DescendantAdded:Connect(function(desc)
+        if not AR2_CFG.weapon.wallbang then return end
+        if desc:IsA("BasePart") then
+            AR2_wallbangForcePart(desc)
+        elseif desc:IsA("Humanoid") then
+            local model = desc.Parent
+            if model and model:IsA("Model") then removeCharacterTags(model) end
+        end
+    end)
+end
+
+function stopWallbangTagging()
+    if wallbangTagConn then wallbangTagConn:Disconnect() wallbangTagConn = nil end
+    for part, gid in pairs(AR2_wallbangSaved) do
+        pcall(function()
+            if part and part.Parent then part.CollisionGroupId = gid end
+        end)
+    end
+    AR2_wallbangSaved = {}
+end
+
+function AR2_setWallbang(enabled)
+    AR2_CFG.weapon.wallbang = enabled
+    AR2_wallbangRaycastBypass = enabled
+    if enabled then
+        startWallbangTagging()
     else
-        if AR2_steerConn then AR2_steerConn:Disconnect() AR2_steerConn = nil end
-        if AR2_steerApplied then
-            local model = AR2_carPick()
-            local cfg = model and AR2_carConfig(model)
-            if cfg and cfg.Physics then
-                for k, v in pairs(AR2_steerSaved) do
-                    if type(k) == "string" and k:sub(1,3) ~= "sa_" then
-                        cfg.Physics[k] = v
-                    end
+        stopWallbangTagging()
+    end
+end
+
+-- =============================================
+-- UNIFIED NAMECALL HOOK (HBE + WALLBANG)
+-- =============================================
+-- Single hook, avoids conflict between two __namecall installers.
+-- Time-gated: only modifies raycasts within ~1.5s of a shot.
+-- Builds FRESH RaycastParams — never mutates the game's shared params.
+AR2_sharedHookInstalled = false
+
+function AR2_installSharedNamecallHook()
+    if AR2_sharedHookInstalled then return true end
+
+    local installOk = pcall(function()
+        if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
+            error("no hookmetamethod available")
+        end
+
+        local oldNC
+        oldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+
+            if method == "Raycast" and self == workspace then
+                -- GATE: only intercept inside the post-shot window.
+                -- Outside it, pass through completely untouched.
+                if os.clock() >= AR2_hookWindowUntil then
+                    return oldNC(self, ...)
                 end
-                if type(cfg.Physics.Wheels) == "table" then
-                    for wname, wheel in pairs(cfg.Physics.Wheels) do
-                        if type(wheel) == "table" then
-                            local saved = AR2_steerSaved["sa_"..tostring(wname)]
-                            if saved then wheel.SteerAngle = saved end
+
+                local origin, direction, params = ...
+                if typeof(origin) == "Vector3" and typeof(params) == "RaycastParams" then
+                    local filter = params.FilterDescendantsInstances
+                    local callParams = params
+
+                    -- LAYER 1: Wallbang bypass (fresh params; original untouched)
+                    if AR2_wallbangRaycastBypass then
+                        local newParams = RaycastParams.new()
+                        newParams.FilterType = Enum.RaycastFilterType.Include
+                        newParams.IgnoreWater = params.IgnoreWater
+                        newParams.CollisionGroup = params.CollisionGroup
+                        pcall(function() newParams.RespectCanCollide = params.RespectCanCollide end)
+
+                        local newFilter = {}
+                        if AR2_LocalPlayer.Character then table.insert(newFilter, AR2_LocalPlayer.Character) end
+                        if CharactersFolder then table.insert(newFilter, CharactersFolder) end
+                        if ZombiesFolder   then table.insert(newFilter, ZombiesFolder)   end
+                        if filter then
+                            for _, inst in ipairs(filter) do
+                                if typeof(inst) == "Instance"
+                                and inst:IsA("Model")
+                                and inst:FindFirstChildOfClass("Humanoid")
+                                and inst ~= AR2_LocalPlayer.Character then
+                                    table.insert(newFilter, inst)
+                                end
+                            end
+                        end
+                        newParams.FilterDescendantsInstances = newFilter
+                        callParams = newParams
+
+                    -- LAYER 2: HBE bypass (only when wallbang is off)
+                    elseif AR2_CFG.weapon.hbeOn and filter then
+                        local hasChars = false
+                        for _, inst in ipairs(filter) do
+                            if inst == AR2_Characters then hasChars = true break end
+                        end
+                        if hasChars then
+                            local newParams = RaycastParams.new()
+                            newParams.FilterType = params.FilterType
+                            newParams.IgnoreWater = params.IgnoreWater
+                            newParams.CollisionGroup = params.CollisionGroup
+                            pcall(function() newParams.RespectCanCollide = params.RespectCanCollide end)
+
+                            local cleaned = {}
+                            for _, inst in ipairs(filter) do
+                                if inst ~= AR2_Characters then table.insert(cleaned, inst) end
+                            end
+                            local selfChar = AR2_LocalPlayer.Character
+                            if selfChar then table.insert(cleaned, selfChar) end
+                            newParams.FilterDescendantsInstances = cleaned
+                            callParams = newParams
                         end
                     end
-                end
-            end
-            AR2_steerSaved, AR2_steerApplied = {}, false
-        end
-    end
-end
-```
 
----
-
-## 4. Car TP Dash
-
-```lua
-AR2_carDashConn = nil
-AR2_carDashLast = 0
-
-function AR2_startCarDash()
-    if AR2_carDashConn then return end
-    AR2_CFG.car.tpDash = true
-    AR2_carDashLast = os.clock()
-
-    AR2_carDashConn = AR2_RunService.Heartbeat:Connect(function()
-        if not AR2_CFG.car.tpDash then AR2_stopCarDash() return end
-        local now = os.clock()
-        if now - AR2_carDashLast < AR2_CFG.car.tpDashInterval then return end
-        AR2_carDashLast = now
-
-        local model = AR2_carPick()
-        if not model then return end
-
-        local fwd  = workspace.CurrentCamera.CFrame.LookVector
-        local flat = Vector3.new(fwd.X, 0, fwd.Z)
-        if flat.Magnitude < 0.01 then return end
-        flat = flat.Unit
-
-        local verticalOffset = AR2_CFG.car.tpDashVert or 0
-        local movement = flat * AR2_CFG.car.tpDashStuds + Vector3.new(0, verticalOffset, 0)
-
-        local curPivot = model:GetPivot()
-        local newPivot = CFrame.new(curPivot.Position + movement) * (curPivot - curPivot.Position)
-
-        -- Anchor all parts, pivot, then unanchor
-        local savedAnchor = {}
-        for _, p in ipairs(model:GetDescendants()) do
-            if p:IsA("BasePart") then
-                savedAnchor[p] = p.Anchored
-                p.Anchored = true
-                p.AssemblyLinearVelocity = Vector3.zero
-                p.AssemblyAngularVelocity = Vector3.zero
-            end
-        end
-        model:PivotTo(newPivot)
-        for p, wasAnchored in pairs(savedAnchor) do
-            if p and p.Parent then
-                p.Anchored = wasAnchored
-                p.AssemblyLinearVelocity = Vector3.zero
-                p.AssemblyAngularVelocity = Vector3.zero
-            end
-        end
-    end)
-end
-
-function AR2_stopCarDash()
-    AR2_CFG.car.tpDash = false
-    if AR2_carDashConn then AR2_carDashConn:Disconnect() AR2_carDashConn = nil end
-end
-```
-
----
-
-## 5. Vehicle Noclip (anchor-based, WASD + Space/Ctrl)
-
-```lua
-AR2_carNoclipActive  = false
-AR2_carNoclipConn    = nil
-AR2_carNoclipModel   = nil
-AR2_carNoclipRoot    = nil
-AR2_carNoclipParts   = nil
-AR2_carNoclipOffsets = nil
-AR2_carNoclipKeys    = {W=false,A=false,S=false,D=false,Space=false,LeftControl=false}
-
-function AR2_carNoclipStart()
-    if AR2_carNoclipConn then return true end
-    local model = AR2_carPick()
-    if not model then return false end
-    local char = AR2_LocalPlayer.Character
-    local hum  = char and char:FindFirstChildWhichIsA("Humanoid")
-    if not hum or not hum.Sit then return false end
-
-    local root = model.PrimaryPart or model:FindFirstChild("Base")
-    if not root then
-        for _, p in ipairs(model:GetDescendants()) do
-            if p:IsA("BasePart") then root = p break end
-        end
-    end
-    if not root then return false end
-
-    local parts = {}
-    for _, p in ipairs(model:GetDescendants()) do
-        if p:IsA("BasePart") then parts[#parts + 1] = p end
-    end
-    if #parts == 0 then return false end
-
-    local offsets = {}
-    local savedAnchors = {}
-    for _, p in ipairs(parts) do
-        savedAnchors[p] = p.Anchored
-        offsets[p] = root.CFrame:Inverse() * p.CFrame
-        p.Anchored = true
-        p.AssemblyLinearVelocity  = Vector3.zero
-        p.AssemblyAngularVelocity = Vector3.zero
-    end
-
-    AR2_carNoclipModel   = model
-    AR2_carNoclipRoot    = root
-    AR2_carNoclipParts   = parts
-    AR2_carNoclipOffsets = offsets
-    AR2_carNoclipSaved   = savedAnchors
-    AR2_carNoclipActive  = true
-
-    for k in pairs(AR2_carNoclipKeys) do AR2_carNoclipKeys[k] = false end
-
-    AR2_carNoclipConn = AR2_RunService.Heartbeat:Connect(function()
-        local m = AR2_carNoclipModel
-        local r = AR2_carNoclipRoot
-        if not AR2_carNoclipActive or not m or not m.Parent or not r or not r.Parent then
-            AR2_carNoclipSetEnabled(false)
-            return
-        end
-        local c = AR2_LocalPlayer.Character
-        local h = c and c:FindFirstChildWhichIsA("Humanoid")
-        if not h or not h.Sit then
-            AR2_carNoclipSetEnabled(false)
-            return
-        end
-
-        local cam = workspace.CurrentCamera
-        local move = Vector3.zero
-        if AR2_carNoclipKeys.W          then move += cam.CFrame.LookVector  end
-        if AR2_carNoclipKeys.S          then move -= cam.CFrame.LookVector  end
-        if AR2_carNoclipKeys.D          then move += cam.CFrame.RightVector end
-        if AR2_carNoclipKeys.A          then move -= cam.CFrame.RightVector end
-        if AR2_carNoclipKeys.Space      then move += Vector3.new(0,1,0)    end
-        if AR2_carNoclipKeys.LeftControl then move -= Vector3.new(0,1,0)   end
-
-        if move.Magnitude > 0 then
-            local speed = AR2_CFG.car.noclipSpeed or 90
-            local delta = move.Unit * speed * 0.05
-            local newCF = r.CFrame + delta
-            r.CFrame = newCF
-            for part, offset in pairs(AR2_carNoclipOffsets) do
-                if part and part.Parent then part.CFrame = newCF * offset end
-            end
-        end
-    end)
-
-    return true
-end
-
-AR2_carNoclipEjectGen = AR2_carNoclipEjectGen or 0
-
-function AR2_carNoclipSetEnabled(on)
-    if on then
-        AR2_carNoclipEjectGen = AR2_carNoclipEjectGen + 1
-        return AR2_carNoclipStart()
-    else
-        AR2_carNoclipActive = false
-        if AR2_carNoclipConn then AR2_carNoclipConn:Disconnect() AR2_carNoclipConn = nil end
-
-        if AR2_carNoclipParts and AR2_carNoclipSaved then
-            for _, p in ipairs(AR2_carNoclipParts) do
-                pcall(function()
-                    if p and p.Parent then
-                        p.Anchored = AR2_carNoclipSaved[p] or false
-                        p.AssemblyLinearVelocity  = Vector3.zero
-                        p.AssemblyAngularVelocity = Vector3.zero
+                    local result
+                    if callParams ~= params then
+                        result = oldNC(self, origin, direction, callParams)
+                    else
+                        result = oldNC(self, ...)
                     end
-                end)
-            end
-        end
 
-        local model = AR2_carNoclipModel
-        AR2_carNoclipEjectGen = AR2_carNoclipEjectGen + 1
-        local myGen = AR2_carNoclipEjectGen
-        local delay = math.clamp(AR2_CFG.car.noclipEjectDelay or 0, 0, 5)
-
-        task.delay(delay, function()
-            if AR2_carNoclipEjectGen ~= myGen then return end
-            if not AR2_LocalPlayer.Character then return end
-            AR2_ejectFromVehicle()
-            if model then AR2_stopVehicleVelocity(model) end
-        end)
-
-        AR2_carNoclipModel   = nil
-        AR2_carNoclipRoot    = nil
-        AR2_carNoclipParts   = nil
-        AR2_carNoclipOffsets = nil
-        AR2_carNoclipSaved   = nil
-        for k in pairs(AR2_carNoclipKeys) do AR2_carNoclipKeys[k] = false end
-        return true
-    end
-end
-
-function AR2_carNoclipStop() AR2_carNoclipSetEnabled(false) end
-
--- Key listeners for vehicle noclip
-AR2_UserInputService.InputBegan:Connect(function(input, gpe)
-    if gpe then return end
-    if not AR2_carNoclipActive then return end
-    local k = input.KeyCode
-    if     k == Enum.KeyCode.W then AR2_carNoclipKeys.W = true
-    elseif k == Enum.KeyCode.A then AR2_carNoclipKeys.A = true
-    elseif k == Enum.KeyCode.S then AR2_carNoclipKeys.S = true
-    elseif k == Enum.KeyCode.D then AR2_carNoclipKeys.D = true
-    elseif k == Enum.KeyCode.Space then AR2_carNoclipKeys.Space = true
-    elseif k == Enum.KeyCode.LeftControl then AR2_carNoclipKeys.LeftControl = true end
-end)
-AR2_UserInputService.InputEnded:Connect(function(input, gpe)
-    if gpe then return end
-    local k = input.KeyCode
-    if     k == Enum.KeyCode.W then AR2_carNoclipKeys.W = false
-    elseif k == Enum.KeyCode.A then AR2_carNoclipKeys.A = false
-    elseif k == Enum.KeyCode.S then AR2_carNoclipKeys.S = false
-    elseif k == Enum.KeyCode.D then AR2_carNoclipKeys.D = false
-    elseif k == Enum.KeyCode.Space then AR2_carNoclipKeys.Space = false
-    elseif k == Enum.KeyCode.LeftControl then AR2_carNoclipKeys.LeftControl = false end
-end)
-```
-
----
-
-## 6. Vehicle Noclip TP (Fly Car to Target)
-
-```lua
-AR2_carNoclipTP = { busy = false, cancel = false, gen = 0, lastResult = "" }
-
-local function AR2_carNoclipTPMoveTo(newCF)
-    local r = AR2_carNoclipRoot
-    if not r or not r.Parent then return end
-    r.CFrame = newCF
-    for part, offset in pairs(AR2_carNoclipOffsets or {}) do
-        if part and part.Parent then part.CFrame = newCF * offset end
-    end
-end
-
-function AR2_carNoclipTP.run(goalPosition, label)
-    AR2_carNoclipTP.gen = (AR2_carNoclipTP.gen or 0) + 1
-    local mine = AR2_carNoclipTP.gen
-    AR2_carNoclipTP.cancel = true
-
-    task.spawn(function()
-        while AR2_carNoclipTP.busy do task.wait() end
-        if AR2_carNoclipTP.gen ~= mine then return end
-
-        AR2_carNoclipTP.busy, AR2_carNoclipTP.cancel = true, false
-        local started = os.clock()
-        local tag = label or "car TP"
-
-        local char = AR2_LocalPlayer.Character
-        local hum = char and char:FindFirstChildWhichIsA("Humanoid")
-        if not hum or not hum.Sit then
-            AR2_carNoclipTP.lastResult = tag .. " -- not in a vehicle"
-            AR2_carNoclipTP.busy = false
-            return
-        end
-
-        local model = AR2_carPick()
-        if not model then
-            AR2_carNoclipTP.lastResult = tag .. " -- no vehicle found"
-            AR2_carNoclipTP.busy = false
-            return
-        end
-
-        AR2_carNoclipSetEnabled(false)
-        task.wait(0.05)
-        local ok = AR2_carNoclipSetEnabled(true)
-        if not ok then
-            AR2_carNoclipTP.lastResult = tag .. " -- could not enable noclip"
-            AR2_carNoclipTP.busy = false
-            return
-        end
-
-        local vertOffset = AR2_CFG.car.noclipTPVertOffset or 5
-        local goal = Vector3.new(goalPosition.X, goalPosition.Y + vertOffset, goalPosition.Z)
-
-        local speed    = math.max(50, AR2_CFG.car.noclipTPSpeed or 800)
-        local maxSecs  = math.max(2, AR2_CFG.car.noclipTPMaxSeconds or 15)
-        local deadline = os.clock() + maxSecs
-        local reached  = false
-
-        while os.clock() < deadline do
-            if AR2_carNoclipTP.cancel or AR2_carNoclipTP.gen ~= mine then break end
-            local r = AR2_carNoclipRoot
-            if not r or not r.Parent then break end
-
-            local delta = goal - r.Position
-            local dist  = delta.Magnitude
-            if dist <= 2 then
-                reached = true
-                break
-            end
-
-            local step = math.min(speed * (1/60), dist)
-            local baseCF = r.CFrame - r.CFrame.Position
-            AR2_carNoclipTPMoveTo(CFrame.new(r.Position + delta.Unit * step) * baseCF)
-
-            AR2_RunService.Heartbeat:Wait()
-        end
-
-        AR2_carNoclipSetEnabled(false)
-
-        local elapsed = os.clock() - started
-        if reached then
-            AR2_carNoclipTP.lastResult = string.format("%s -- arrived in %.1fs", tag, elapsed)
-        else
-            AR2_carNoclipTP.lastResult = string.format("%s -- timeout after %.1fs", tag, elapsed)
-        end
-        AR2_carNoclipTP.busy = false
-    end)
-end
-
-function AR2_carNoclipTP.toPlayer()
-    local wanted = AR2_CFG.tp.target
-    if wanted == "-" then AR2_carNoclipTP.lastResult = "no player picked" return end
-    local root = AR2_tpTargetRoot()   -- defined in tp system
-    if not root then AR2_carNoclipTP.lastResult = "target not found" return end
-    AR2_carNoclipTP.run(root.Position, wanted)
-end
-
-function AR2_carNoclipTP.toPosition(position, label)
-    AR2_carNoclipTP.run(position, label or "map")
-end
-
-function AR2_carNoclipTP.stop()
-    AR2_carNoclipTP.cancel = true
-    AR2_carNoclipTP.gen = (AR2_carNoclipTP.gen or 0) + 1
-end
-```
-
----
-
-## 7. Car Fly (with auto-eject on damage)
-
-```lua
-AR2_CFG.car.fly      = AR2_CFG.car.fly or false
-AR2_CFG.car.flySpeed = AR2_CFG.car.flySpeed or 100
-
-AR2_carFlyActive        = false
-AR2_carFlyConn          = nil
-AR2_carFlyVel           = Vector3.zero
-AR2_carFlyModel         = nil
-AR2_carFlyRoot          = nil
-AR2_carFlySavedParts    = nil
-AR2_carFlyInitialHealth = nil
-AR2_carFlyHealthWatch   = 0
-
-local AR2_CAR_FLY_MIN_SPEED = 10
-local AR2_CAR_FLY_MAX_SPEED = 400
-
-local function AR2_carFlyGetModel()
-    local char = AR2_LocalPlayer.Character
-    local hum  = char and char:FindFirstChildWhichIsA("Humanoid")
-    if hum and hum.SeatPart then
-        local node = hum.SeatPart
-        while node and node.Parent do
-            if node.Parent == AR2_Vehicles then return node end
-            node = node.Parent
-        end
-    end
-    if AR2_carPick then
-        local ok, m = pcall(AR2_carPick)
-        if ok then return m end
-    end
-    return nil
-end
-
-function AR2_carFlyStop()
-    AR2_carFlyActive        = false
-    AR2_CFG.car.fly         = false
-    AR2_carFlyInitialHealth = nil
-    if AR2_carFlyConn then AR2_carFlyConn:Disconnect() AR2_carFlyConn = nil end
-    AR2_carFlyVel = Vector3.zero
-
-    if AR2_carFlySavedParts then
-        for part, wasCollide in pairs(AR2_carFlySavedParts) do
-            pcall(function()
-                if part and part.Parent then
-                    part.CanCollide = wasCollide
-                    part.AssemblyLinearVelocity  = Vector3.zero
-                    part.AssemblyAngularVelocity = Vector3.zero
+                    -- HBE result interception: proxy part hit -> real Head
+                    if AR2_CFG.weapon.hbeOn and result and result.Instance then
+                        local hit = result.Instance
+                        if hit:GetAttribute("ar2_hbe") then
+                            for char, hbePart in pairs(AR2_hbeVisuals) do
+                                if hbePart == hit then
+                                    local realHead = char:FindFirstChild("Head")
+                                    if realHead then
+                                        return {
+                                            Instance = realHead,
+                                            Position = result.Position,
+                                            Normal   = result.Normal,
+                                            Material = result.Material,
+                                            Distance = result.Distance,
+                                        }
+                                    end
+                                    break
+                                end
+                            end
+                        end
+                    end
+                    return result
                 end
-            end)
-        end
-    end
-    AR2_carFlyModel      = nil
-    AR2_carFlyRoot       = nil
-    AR2_carFlySavedParts = nil
-end
 
-local function AR2_carFlyDamageEject()
-    local model = AR2_carFlyModel
-    AR2_carFlyStop()
-    AR2_ejectFromVehicle()
-    AR2_stopVehicleVelocity(model)
-    -- optional notification hook
-    pcall(function()
-        local NL = getgenv and getgenv().OriginHUB_NL
-        if NL then
-            local Notif = NL:CreateNotification()
-            Notif.new({Title="Origin HUB", Content="Car took damage — auto-ejected", Duration=3})
-        end
-    end)
-end
+                return oldNC(self, ...)
+            end
 
-function AR2_carFlyStart()
-    if AR2_carFlyActive then return true end
-    local model = AR2_carFlyGetModel()
-    if not model then return false end
-    local char = AR2_LocalPlayer.Character
-    local hum  = char and char:FindFirstChildWhichIsA("Humanoid")
-    if not hum or not hum.Sit then return false end
-
-    local root = model.PrimaryPart or model:FindFirstChild("Base")
-    if not root then
-        for _, p in ipairs(model:GetDescendants()) do
-            if p:IsA("BasePart") then root = p break end
-        end
-    end
-    if not root then return false end
-
-    AR2_carFlyInitialHealth = AR2_carHealth(model)
-    AR2_carFlyHealthWatch   = 0
-
-    local savedParts = {}
-    for _, p in ipairs(model:GetDescendants()) do
-        if p:IsA("BasePart") then
-            savedParts[p] = p.CanCollide
-            p.CanCollide  = false
-        end
-    end
-
-    AR2_carFlyModel      = model
-    AR2_carFlyRoot       = root
-    AR2_carFlySavedParts = savedParts
-    AR2_carFlyVel        = Vector3.zero
-    AR2_carFlyActive     = true
-    AR2_CFG.car.fly      = true
-
-    AR2_carFlyConn = AR2_RunService.Heartbeat:Connect(function(dt)
-        if not AR2_CFG.car.fly then AR2_carFlyStop() return end
-        local m = AR2_carFlyModel
-        if not m or not m.Parent then AR2_carFlyStop() return end
-        local r = AR2_carFlyRoot
-        if not r or not r.Parent then AR2_carFlyStop() return end
-
-        local c = AR2_LocalPlayer.Character
-        local h = c and c:FindFirstChildWhichIsA("Humanoid")
-        if not h or not h.Sit then AR2_carFlyStop() return end
-
-        -- Auto-eject on damage
-        AR2_carFlyHealthWatch = AR2_carFlyHealthWatch + dt
-        if AR2_carFlyHealthWatch >= 0.1 then
-            AR2_carFlyHealthWatch = 0
-            local hp = AR2_carHealth(m)
-            if hp then
-                if not AR2_carFlyInitialHealth then
-                    AR2_carFlyInitialHealth = hp
-                elseif hp < AR2_carFlyInitialHealth then
-                    AR2_carFlyDamageEject()
+            if method == "FireServer" and AR2_containerPersistEnabled then
+                local args = {...}
+                local eventName = tostring(self.Name)
+                local a1 = tostring(args[1] or "")
+                if a1:lower():find("close")
+                and (eventName:lower():find("container")
+                     or eventName:lower():find("storage")
+                     or a1:lower():find("container")) then
                     return
                 end
             end
-        end
 
-        local cam    = workspace.CurrentCamera
-        local target = Vector3.zero
-        if AR2_UserInputService:IsKeyDown(Enum.KeyCode.W)     then target += cam.CFrame.LookVector  end
-        if AR2_UserInputService:IsKeyDown(Enum.KeyCode.S)     then target -= cam.CFrame.LookVector  end
-        if AR2_UserInputService:IsKeyDown(Enum.KeyCode.D)     then target += cam.CFrame.RightVector end
-        if AR2_UserInputService:IsKeyDown(Enum.KeyCode.A)     then target -= cam.CFrame.RightVector end
-        if AR2_UserInputService:IsKeyDown(Enum.KeyCode.Space) then target += Vector3.new(0, 1, 0)   end
+            return oldNC(self, ...)
+        end))
 
-        local descend = AR2_UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
-            or AR2_UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
-            or AR2_UserInputService:IsKeyDown(Enum.KeyCode.Q)
-            or AR2_UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
-            or AR2_UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
-        if descend then target -= Vector3.new(0, 1, 0) end
-
-        local speed = math.clamp(AR2_CFG.car.flySpeed or 100, AR2_CAR_FLY_MIN_SPEED, AR2_CAR_FLY_MAX_SPEED)
-        local targetVel = target.Magnitude > 0.01 and target.Unit * speed or Vector3.zero
-
-        AR2_carFlyVel = AR2_carFlyVel:Lerp(targetVel, math.min(1, dt * 6))
-
-        -- Yaw only when moving
-        local flatFwd
-        if target.Magnitude > 0.01 then
-            flatFwd = Vector3.new(targetVel.X, 0, targetVel.Z)
-        else
-            flatFwd = Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z)
-        end
-        if flatFwd.Magnitude > 0.01 then
-            local yawCF = CFrame.lookAt(Vector3.zero, flatFwd.Unit)
-            pcall(function()
-                r.CFrame = CFrame.new(r.Position) * (yawCF - yawCF.Position)
-            end)
-        end
-
-        local gravComp = Vector3.new(0, AR2_Workspace.Gravity * dt, 0)
-        r.AssemblyLinearVelocity  = AR2_carFlyVel + gravComp
-        r.AssemblyAngularVelocity = Vector3.zero
+        if getgenv then getgenv().AR2_sharedHookMethod = "hookmetamethod" end
+        AR2_sharedHookInstalled = true
+        print("[shared] unified __namecall hook installed (HBE + Wallbang)")
     end)
 
+    if not installOk then
+        warn("[shared] failed to install unified hook")
+        AR2_sharedHookInstalled = false
+        return false
+    end
     return true
 end
 
-function AR2_carFlySetEnabled(on)
-    if on then
-        local ok = AR2_carFlyStart()
-        if not ok then AR2_CFG.car.fly = false end
-        return ok
-    else
-        AR2_carFlyStop()
-        return true
-    end
-end
-```
+-- =============================================
+-- BULLET HOOK
+-- =============================================
+AR2_success, AR2_Bullets = pcall(function()
+    return require(AR2_ReplicatedFirst:WaitForChild("Framework", 30)).Libraries.Bullets
+end)
+AR2_originalFireFunction = nil
+AR2_recoilOriginalFn     = nil
+AR2_spreadOriginalFn     = nil
 
----
+if AR2_success and AR2_Bullets and AR2_Bullets.Fire then
+    AR2_originalFireFunction = AR2_Bullets.Fire
+    pcall(function() AR2_recoilOriginalFn = debug.getupvalue(AR2_originalFireFunction, 6) end)
+    pcall(function() AR2_spreadOriginalFn = debug.getupvalue(AR2_originalFireFunction, 3) end)
 
-## 8. Vehicle Equip (use weapons while driving)
-
-```lua
-AR2_vehEquipEnabled      = false
-AR2_vehEquipPC           = nil
-AR2_vehEquipOrig         = nil
-AR2_vehEquipInVeh        = false
-AR2_vehEquipBulletHooked = false
-AR2_vehEquipOrigFire     = nil
-
-do
-    local RS = AR2_ReplicatedStorage
-
-    local function _getPC()
-        local ok, pc = pcall(function()
-            return require(RS.Client.Classes.Players).get()
-        end)
-        return ok and pc or nil
+    local function AR2_identitySpread(rng, direction)
+        return direction.Unit
     end
 
-    AR2_vehEquipPC = _getPC()
+    AR2_Bullets.Fire = function(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
+        AR2_lastFireParams = {
+            self = self, pc = playerController,
+            wi = weaponInstance, wd = weaponData,
+        }
+        AR2_hasRealWD      = true
+        AR2_autoSeeded     = true
+        AR2_autoSeeding    = false
+        AR2_tryCacheAmmoRef(weaponInstance)   -- global, declared in RageBot section
+        AR2_noteShot()
+        AR2_extendHookWindow()                -- enable raycast interception ~1.5s
 
-    AR2_RunService.Heartbeat:Connect(function()
-        pcall(function()
-            local pc = AR2_vehEquipPC
-            if not pc then return end
-            local char = pc.Character
-            local flag = char and char.IsVehicleDriver
-            AR2_vehEquipInVeh = flag == true
-        end)
-    end)
-
-    local okCh, Chars = pcall(function() return require(RS.Client.Classes.Characters) end)
-    if okCh and Chars then AR2_vehEquipOrig = Chars.Equip end
-
-    local TIMING = {
-        "NextEquipTime","LastEquipTime","EquipDelay","NextHotbarSwitchTime",
-        "UseDelay","CooldownTime","EquipCooldown","NextEquipValid","EquipReadyAt",
-        "SwitchTime","NextSwitchTime","HotbarSwitchTime","EquipTime","SelectTime",
-    }
-    local VEH_KEYS = { "IsVehicleDriver","Sitting","Mounting","Dismounting" }
-
-    local function _zeroTiming(item)
-        if not item then return end
-        pcall(function()
-            local wmt = getrawmetatable(item)
-            if wmt then setreadonly(wmt, false) end
-            for _, f in ipairs(TIMING) do rawset(item, f, 0) end
-            if wmt then setreadonly(wmt, true) end
-            local inner = rawget(item, "__item")
-            if type(inner) == "table" then
-                local imt = getrawmetatable(inner)
-                if imt then setreadonly(imt, false) end
-                for _, f in ipairs(TIMING) do rawset(inner, f, 0) end
-                if imt then setreadonly(imt, true) end
-            end
-        end)
-    end
-
-    local function _customVehEquip(self, item, ...)
-        _zeroTiming(item)
-        if not (AR2_vehEquipEnabled and AR2_vehEquipInVeh and AR2_vehEquipOrig) then
-            return AR2_vehEquipOrig(self, item, ...)
-        end
-        local smt = getrawmetatable(self)
-        local saved = {}
-        pcall(function()
-            if smt then setreadonly(smt, false) end
-            for _, key in ipairs(VEH_KEYS) do
-                saved[key] = rawget(self, key)
-                rawset(self, key, false)
-            end
-            saved.isItemUsable = rawget(self, "isItemUsable")
-            rawset(self, "isItemUsable", function() return true end)
-            if smt then setreadonly(smt, true) end
-        end)
-        local ok, result = pcall(AR2_vehEquipOrig, self, item, ...)
-        pcall(function()
-            if smt then setreadonly(smt, false) end
-            for _, key in ipairs(VEH_KEYS) do rawset(self, key, saved[key]) end
-            rawset(self, "isItemUsable", saved.isItemUsable)
-            if smt then setreadonly(smt, true) end
-        end)
-        return result
-    end
-
-    local function _patch(char)
-        if not char or not AR2_vehEquipOrig then return false end
-        local mt = getrawmetatable(char)
-        if not mt then return false end
-        local oldIndex = rawget(mt, "__index")
-        setreadonly(mt, false)
-        rawset(mt, "__index", newcclosure(function(self, key)
-            if AR2_vehEquipEnabled and key == "Equip" then
-                return _customVehEquip
-            end
-            if type(oldIndex) == "function" then return oldIndex(self, key)
-            elseif oldIndex ~= nil then return oldIndex[key] end
-            return nil
-        end))
-        setreadonly(mt, true)
-        return true
-    end
-
-    local function _hookBullets()
-        if AR2_vehEquipBulletHooked then return end
-        local ok, Bullets = pcall(function() return require(RS.Client.Libraries.Bullets) end)
-        if not ok or not Bullets or not Bullets.Fire then return end
-        AR2_vehEquipOrigFire = Bullets.Fire
-        pcall(function() setreadonly(Bullets, false) end)
-        rawset(Bullets, "Fire", function(self, pc2, wi, wd, origin, dir, sid)
-            if AR2_vehEquipEnabled and wd then
-                pcall(function()
-                    local wmt = getrawmetatable(wd)
-                    if wmt then setreadonly(wmt, false) end
-                    wd.CanFire = true wd.CanFireInVehicles = true
-                    wd.InVehicle = false wd.VehicleFireLocked = false
-                    if wmt then setreadonly(wmt, true) end
-                    local inner = rawget(wd, "__item")
-                    if type(inner) == "table" then
-                        local imt = getrawmetatable(inner)
-                        if imt then setreadonly(imt, false) end
-                        inner.CanFire = true inner.CanFireInVehicles = true
-                        inner.InVehicle = false inner.VehicleFireLocked = false
-                        if imt then setreadonly(imt, true) end
+        if AR2_hitLogger and AR2_hitLogger.enabled then
+            local shotTime = os.clock()
+            task.delay(0.15, function()
+                local confirmed = false
+                local damage    = 0
+                local target    = nil
+                for _, drop in ipairs(AR2_hpDrops) do
+                    if drop.at >= shotTime - 0.02
+                    and drop.at <= shotTime + AR2_hpDropWindow then
+                        confirmed = true
+                        damage    = damage + drop.delta
+                        target    = target or drop.player
                     end
+                end
+                if confirmed then
+                    local name = (target and target.Name) or "target"
+                    AR2_hitLogger.push(string.format("✓ HIT  %s  -%.0f HP", name, damage), true)
+                else
+                    AR2_hitLogger.push("✗ miss  (no HP drop detected)", false)
+                end
+            end)
+        end
+
+        local ok, result = pcall(function()
+            local originalOrigin    = origin
+            local originalDirection = direction
+
+            local AR2_ibSavedSpd, AR2_ibSavedGrav, AR2_ibSavedDrop = nil, nil, nil
+            local AR2_ibSavedFields = nil
+
+            if AR2_ibEnabled and weaponData and not AR2_CFG.misc.fly then
+                AR2_ibEvaluate()
+                pcall(function()
+                    local spd = AR2_resolveBulletSpeed(weaponData, weaponInstance)
+                    if not spd or spd <= 0 then return end
+
+                    AR2_ibLastSpd    = spd
+                    AR2_ibShotsFired = AR2_ibShotsFired + 1
+
+                    local bestDist = 400
+                    local Characters = AR2_Workspace:FindFirstChild("Characters")
+                    if Characters then
+                        local dir = direction.Unit
+                        local minLat = 5
+                        for _, model in ipairs(Characters:GetChildren()) do
+                            if model:IsA("Model") then
+                                local p = AR2_Players:GetPlayerFromCharacter(model)
+                                if p and p ~= AR2_LocalPlayer then
+                                    local hrp = model:FindFirstChild("HumanoidRootPart")
+                                    if hrp then
+                                        local toT  = hrp.Position - origin
+                                        local proj = toT:Dot(dir)
+                                        if proj > 0 then
+                                            local lat = (toT - dir * proj).Magnitude
+                                            if lat < minLat then
+                                                minLat            = lat
+                                                bestDist          = proj
+                                                AR2_ibLastHitTime = os.clock()
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+
+                    AR2_ibSeedMult(spd, bestDist)
+
+                    local boosted = spd * AR2_ibMult
+                    AR2_ibSavedFields = {
+                        weaponData = weaponData,
+                        originals  = {},
+                        gravity    = weaponData.Gravity,
+                        bulletDrop = weaponData.BulletDrop,
+                    }
+                    local O = AR2_ibSavedFields.originals
+
+                    if type(weaponData.BulletSpeed) == "number" then
+                        O.BulletSpeed = weaponData.BulletSpeed
+                        weaponData.BulletSpeed = boosted
+                    end
+                    if type(weaponData.MuzzleVelocity) == "number" then
+                        O.MuzzleVelocity = weaponData.MuzzleVelocity
+                        weaponData.MuzzleVelocity = boosted
+                    end
+                    if weaponData.FireConfig then
+                        if type(weaponData.FireConfig.BulletSpeed) == "number" then
+                            O.FC_BulletSpeed = weaponData.FireConfig.BulletSpeed
+                            weaponData.FireConfig.BulletSpeed = boosted
+                        end
+                        if type(weaponData.FireConfig.MuzzleVelocity) == "number" then
+                            O.FC_MuzzleVelocity = weaponData.FireConfig.MuzzleVelocity
+                            weaponData.FireConfig.MuzzleVelocity = boosted
+                        end
+                    end
+
+                    AR2_ibSavedSpd  = spd
+                    AR2_ibSavedGrav = weaponData.Gravity
+                    AR2_ibSavedDrop = weaponData.BulletDrop
+
+                    if weaponData.Gravity    ~= nil then weaponData.Gravity    = 0 end
+                    if weaponData.BulletDrop ~= nil then weaponData.BulletDrop = 0 end
                 end)
             end
-            return AR2_vehEquipOrigFire(self, pc2, wi, wd, origin, dir, sid)
+
+            local aimEntity, aimPart = nil, nil
+            if AR2_CFG.magicAim.on or AR2_CFG.rageBot.on then
+                aimEntity, aimPart = AR2_magicTarget()
+                AR2_magicAim.target = aimEntity
+            end
+
+            if (AR2_CFG.magicAim.on or AR2_CFG.rageBot.on) and aimEntity and aimPart then
+                if AR2_CFG.magicAim.originShift and aimEntity.model then
+                    local headPart = aimEntity.headCollider or aimEntity.head
+                    if headPart then
+                        local nudge = originalOrigin + originalDirection * AR2_CFG.magicBullet.forwardNudge
+                        local newOrigin, clear = AR2_findBestOrigin(nudge, originalDirection, headPart.Position, aimEntity.model)
+                        if clear or newOrigin ~= originalOrigin then
+                            origin = newOrigin
+                            direction = (headPart.Position - origin).Unit
+                        end
+                    end
+                end
+                local aimPoint = AR2_predict(aimPart, origin, aimEntity.velocity)
+                local bend = aimPoint - origin
+                if bend.Magnitude > 0.001 then
+                    local angle = math.deg(math.acos(math.clamp(bend.Unit:Dot(direction.Unit), -1, 1)))
+                    local chance = AR2_CFG.magicAim.redirectChance or 100
+                    if angle <= AR2_CFG.magicAim.maxBend and math.random(1,100) <= chance then
+                        direction = bend.Unit
+                    end
+                end
+            end
+
+            local applyNoSpread = AR2_CFG.weapon.noSpread
+            if AR2_CFG.magicAim.killSpread and aimEntity ~= nil then
+                applyNoSpread = true
+            end
+
+            if applyNoSpread then
+                pcall(function() debug.setupvalue(AR2_originalFireFunction, 3, AR2_identitySpread) end)
+            else
+                if AR2_spreadOriginalFn then
+                    pcall(debug.setupvalue, AR2_originalFireFunction, 3, AR2_spreadOriginalFn)
+                end
+            end
+
+            if AR2_CFG.weapon.noRecoil then
+                pcall(function()
+                    debug.setupvalue(AR2_originalFireFunction, 6,
+                        function(...) return Vector2.new(0,0), 0, 0, 0, 0 end)
+                end)
+            elseif AR2_CFG.weapon.recoilReduction and AR2_CFG.weapon.recoilReduction > 0 then
+                local reduction = AR2_CFG.weapon.recoilReduction / 100
+                if AR2_recoilOriginalFn then
+                    local function newRecoil(...)
+                        local x, y, z, a, b = AR2_recoilOriginalFn(...)
+                        return Vector2.new(x.X*(1-reduction), x.Y*(1-reduction)),
+                               z*(1-reduction), a*(1-reduction), b*(1-reduction), 0
+                    end
+                    pcall(debug.setupvalue, AR2_originalFireFunction, 6, newRecoil)
+                end
+            else
+                if AR2_recoilOriginalFn then
+                    pcall(debug.setupvalue, AR2_originalFireFunction, 6, AR2_recoilOriginalFn)
+                end
+            end
+
+            -- WALLBANG: penetration fields + zero drop/spread.
+            -- The actual filter rewrite is in the __namecall hook, gated by
+            -- AR2_hookWindowUntil which we just refreshed above.
+            if AR2_CFG.weapon.wallbang and not AR2_CFG.misc.fly then
+                local penFields = {
+                    "Penetration","PenetrationPower","WallPenetration",
+                    "WallPenetrationPower","PierceCount","Piercing",
+                    "BulletPenetration","ArmorPenetration","PenPower",
+                }
+                for _, f in ipairs(penFields) do
+                    pcall(function() weaponData[f] = 9999 end)
+                end
+                pcall(function() weaponData.CanPenetrate    = true end)
+                pcall(function() weaponData.PenetrateWalls  = true end)
+                pcall(function() weaponData.IgnoreArmor     = true end)
+                pcall(function()
+                    if weaponData.FireConfig then
+                        weaponData.FireConfig.Penetration = 9999
+                        weaponData.FireConfig.PenetrationPower = 9999
+                    end
+                end)
+
+                if weaponData.Gravity    ~= nil then weaponData.Gravity    = 0 end
+                if weaponData.BulletDrop ~= nil then weaponData.BulletDrop = 0 end
+                pcall(function() debug.setupvalue(AR2_originalFireFunction, 3, AR2_identitySpread) end)
+            end
+
+            local _savedGrav = workspace.Gravity
+            if AR2_CFG.weapon.noBulletDrop or AR2_CFG.weapon.wallbang then workspace.Gravity = 0 end
+            local result = AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
+            workspace.Gravity = _savedGrav
+
+            if AR2_ibSavedFields then
+                pcall(function()
+                    local wd = AR2_ibSavedFields.weaponData
+                    local O  = AR2_ibSavedFields.originals
+                    if wd then
+                        if O.BulletSpeed    ~= nil then wd.BulletSpeed    = O.BulletSpeed    end
+                        if O.MuzzleVelocity ~= nil then wd.MuzzleVelocity = O.MuzzleVelocity end
+                        if wd.FireConfig then
+                            if O.FC_BulletSpeed    ~= nil then wd.FireConfig.BulletSpeed    = O.FC_BulletSpeed    end
+                            if O.FC_MuzzleVelocity ~= nil then wd.FireConfig.MuzzleVelocity = O.FC_MuzzleVelocity end
+                        end
+                        if AR2_ibSavedFields.gravity    ~= nil then wd.Gravity    = AR2_ibSavedFields.gravity    end
+                        if AR2_ibSavedFields.bulletDrop ~= nil then wd.BulletDrop = AR2_ibSavedFields.bulletDrop end
+                    end
+                end)
+                AR2_ibSavedFields = nil
+            end
+
+            if AR2_CFG.hitmarker.enabled then
+                local _rp=RaycastParams.new()
+                _rp.FilterType=Enum.RaycastFilterType.Exclude
+                _rp.FilterDescendantsInstances={AR2_LocalPlayer.Character}
+                local _hit=AR2_Workspace:Raycast(origin,direction*2000,_rp)
+                local _det=false
+                if _hit and _hit.Instance then
+                    local _m=_hit.Instance
+                    while _m and not _m:IsA("Model") do _m=_m.Parent end
+                    if _m then
+                        _det=(AR2_Characters~=nil and _m.Parent==AR2_Characters)
+                            or(ZombiesFolder~=nil and _m.Parent==ZombiesFolder)
+                            or _m:FindFirstChildOfClass("Humanoid")~=nil
+                    end
+                end
+                if _det then AR2_hitmarkerFlag=true end
+            end
+
+            if AR2_tracersEnabled then AR2_addTracer(origin, direction) end
+
+            return result
         end)
-        pcall(function() setreadonly(Bullets, true) end)
-        AR2_vehEquipBulletHooked = true
-    end
-
-    if AR2_vehEquipPC and AR2_vehEquipPC.Character then
-        _patch(AR2_vehEquipPC.Character)
-    end
-    _hookBullets()
-
-    AR2_LocalPlayer.CharacterAdded:Connect(function()
-        AR2_vehEquipOrig = nil
-        task.wait(1)
-        local pc4 = _getPC()
-        if pc4 then
-            AR2_vehEquipPC = pc4
-            if pc4.Character then _patch(pc4.Character) end
+        if not ok then
+            warn("[fire] hook error: " .. tostring(result))
+            return AR2_originalFireFunction(self, playerController, weaponInstance, weaponData, origin, direction, shotId)
         end
-        local ok6, C = pcall(function() return require(RS.Client.Classes.Characters) end)
-        if ok6 and C then AR2_vehEquipOrig = C.Equip end
+        return result
+    end
+end
+
+-- =============================================
+-- HBE — Hitbox Expander
+-- =============================================
+AR2_hbeVisuals       = {}
+AR2_hbeChildConn     = nil
+AR2_hbeScanThread    = false
+
+local function AR2_hbeIsLocalPlayer(character)
+    if not character then return false end
+    if character == AR2_LocalPlayer.Character then return true end
+    if AR2_Players:GetPlayerFromCharacter(character) == AR2_LocalPlayer then return true end
+    if character.Name == AR2_LocalPlayer.Name then return true end
+    return false
+end
+
+local function AR2_hbeAddVisual(character)
+    if AR2_hbeVisuals[character] then return end
+    if AR2_hbeIsLocalPlayer(character) then return end
+    if not character:FindFirstChildOfClass("Humanoid") then return end
+    local realHead = character:FindFirstChild("Head")
+    if not realHead then return end
+    local charRoot = character:FindFirstChild("HumanoidRootPart") or realHead
+    if (charRoot.Position - AR2_localPosition()).Magnitude > 2000 then return end
+
+    local v = Instance.new("Part")
+    v.Name         = "ar2_hbe_head"
+    v.Size         = Vector3.new(AR2_CFG.weapon.hbeSize, AR2_CFG.weapon.hbeSize, AR2_CFG.weapon.hbeSize)
+    v.Transparency = 1
+    v.CanCollide   = false
+    v.CanTouch     = false
+    v.CanQuery     = true
+    v.Massless     = true
+    v.Anchored     = true
+    v.CastShadow   = false
+    v:SetAttribute("ar2_hbe", true)
+    v.CFrame       = realHead.CFrame
+    v.Parent       = character
+
+    local followConn
+    followConn = AR2_RunService.Heartbeat:Connect(function()
+        if not v or not v.Parent then
+            if followConn then followConn:Disconnect() end
+            AR2_hbeVisuals[character] = nil
+            return
+        end
+        if not realHead or not realHead.Parent then
+            v:Destroy()
+            if followConn then followConn:Disconnect() end
+            AR2_hbeVisuals[character] = nil
+            return
+        end
+        v.CFrame = realHead.CFrame
+    end)
+
+    AR2_hbeVisuals[character] = v
+    character.AncestryChanged:Connect(function()
+        if not character.Parent then
+            if v and v.Parent then v:Destroy() end
+            if followConn then followConn:Disconnect() end
+            AR2_hbeVisuals[character] = nil
+        end
     end)
 end
 
-function AR2_setVehicleEquip(enabled)
-    AR2_vehEquipEnabled = enabled
-    AR2_CFG.weapon.vehicleEquip = enabled
-end
-```
-
----
-
-## 9. Unload / Teardown
-
-```lua
-function AR2_unloadVehicles()
-    AR2_carMods.destroy()
-    AR2_carFlyStop()
-    AR2_carNoclipStop()
-    if AR2_carNoclipTP then AR2_carNoclipTP.stop() end
-    AR2_stopCarDash()
-    AR2_setBoatMode(false)
-    AR2_setRemoveDrag(false)
-    AR2_setFullSteer(false)
-    AR2_setVehicleEquip(false)
-end
-```
-
----
-
-## 10. Optional — Map TP From Seated State
-
-The map click handler in the original script branches on whether you're seated:
-
-```lua
--- Inside the map ImageButton.Activated handler:
-local char = AR2_LocalPlayer.Character
-local hum  = char and char:FindFirstChildWhichIsA("Humanoid")
-local seated = hum and hum.SeatPart ~= nil
-
-if seated then
-    local carModel = AR2_carPick()
-    if carModel and AR2_carNoclipTP then
-        pcall(function() AR2_carNoclipTP.toPosition(dest, label) end)
-        AR2_tp.toggleMap(false)
-        return
+function AR2_hbeScan()
+    if not AR2_Characters then return end
+    local localRoot = AR2_localPosition()
+    for _, model in ipairs(AR2_Characters:GetChildren()) do
+        if model:IsA("Model") and not AR2_hbeIsLocalPlayer(model) then
+            local root = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Head")
+            if root then
+                if (root.Position - localRoot).Magnitude <= 2000 then
+                    AR2_hbeAddVisual(model)
+                else
+                    local v = AR2_hbeVisuals[model]
+                    if v then v:Destroy() AR2_hbeVisuals[model] = nil end
+                end
+            end
+        end
     end
 end
--- else fall through to on-foot AR2_tp.toPosition(dest, label)
-```
 
----
+function AR2_hbeRemoveAll()
+    for char, v in pairs(AR2_hbeVisuals) do
+        if v and v.Parent then v:Destroy() end
+        AR2_hbeVisuals[char] = nil
+    end
+    AR2_hbeVisuals = {}
+end
 
-## Summary — What's in each block
+function AR2_hbeUpdateSizes()
+    for _, v in pairs(AR2_hbeVisuals) do
+        if v and v.Parent then
+            v.Size = Vector3.new(AR2_CFG.weapon.hbeSize, AR2_CFG.weapon.hbeSize, AR2_CFG.weapon.hbeSize)
+        end
+    end
+end
 
-| # | System | Key entry points |
-|---|--------|------------------|
-| 1 | Core helpers | `AR2_carBase`, `AR2_carPick`, `AR2_carConfig`, `AR2_occupiedCar`, `AR2_ejectFromVehicle`, `AR2_carHealth` |
-| 2 | Tuning mods | `AR2_carMods.apply()`, `AR2_sweep()`, `AR2_applyTo()` |
-| 3 | Extra mods | `AR2_setBoatMode`, `AR2_setRemoveDrag`, `AR2_setFullSteer` |
-| 4 | TP Dash | `AR2_startCarDash`, `AR2_stopCarDash` |
-| 5 | Vehicle Noclip | `AR2_carNoclipStart`, `AR2_carNoclipSetEnabled`, `AR2_carNoclipStop` |
-| 6 | Vehicle Noclip TP | `AR2_carNoclipTP.run/toPlayer/toPosition/stop` |
-| 7 | Car Fly | `AR2_carFlyStart`, `AR2_carFlySetEnabled`, `AR2_carFlyStop` |
-| 8 | Vehicle Equip | `AR2_setVehicleEquip` |
-
-**External dependencies you'll still need to supply:**
-- `AR2_localPosition()` — returns local player's world position
-- `AR2_tpTargetRoot()` — returns root part of the selected TP target (used by `carNoclipTP.toPlayer`)
-- `AR2_tp.toggleMap(on)` — only if you use the map-click wiring in block 10
-- Metamethod helpers: `getrawmetatable`, `setreadonly`, `newcclosure`, `getgenv` (executor provided)
+function AR2_hbeSetEnabled(enabled)
+    AR2_CFG.weapon.hbeOn = enabled
+    if enabled then
+        AR2_installSharedNamecallHook()
+        AR2_hbeScan()
+        if AR2_Characters and not AR2_hbeChildConn then
+            AR2_hbeChildConn = AR2_Characters.ChildAdded:Connect(function(model)
+                if not model:IsA("Model") then return end
+                if not AR2_CFG.weapon.hbeOn then return end
+                if model.Name == AR2_LocalPlayer.Name then return end
+                task.wait(0.3)
+                if AR2_hbeIsLocalPlayer(model) then return end
+                AR2_hbeAddVisual(model)
+            end)
+        end
+        if not AR2_hbeScanThread then
+            AR2_hbeScanThread = true
+            task.spawn(function()
+                while true do
+                    task.wait(2)
+                    if AR2_CFG.weapon.hbeOn then pcall(AR2_hbeScan) end
+                end
+            end)
+        end
+    else
+        AR2_hbeRemoveAll()
+    end
+end
