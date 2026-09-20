@@ -1,0 +1,210 @@
+AR2_wallbangTagConn    = nil
+AR2_wallbangScanConn   = nil
+local CharactersFolder = AR2_Workspace:WaitForChild("Characters", 5)
+local ZombiesFolder    = AR2_Workspace:WaitForChild("Zombies", 5)
+
+AR2_wallbangSaved      = {}
+AR2_WALLBANG_GROUPS    = { [7]=true, [8]=true, [9]=true, [11]=true, [17]=true }
+
+local AR2_wallbangFilterHooked = false
+local AR2_wallbangRealFilter   = nil
+
+-- Skip characters and corpses so we don't break game hit detection
+local function isCharacterPart(part)
+    if not part then return false end
+    local parent = part.Parent
+    while parent do
+        if parent:FindFirstChildOfClass("Humanoid") then return true end
+        if parent:IsA("Model")
+        and (parent.Parent == CharactersFolder or parent.Parent == ZombiesFolder) then
+            return true
+        end
+        parent = parent.Parent
+    end
+    return false
+end
+
+local function isCorpsePart(part)
+    if not part then return false end
+    if AR2_Corpses and part:IsDescendantOf(AR2_Corpses) then return true end
+    return false
+end
+
+-- Skip already-modified parts so we don't touch them twice
+local function isAlreadyTouched(part)
+    return AR2_wallbangSaved[part] ~= nil
+end
+
+-- The master "make this part penetrable" function
+local function applyWallbangToPart(part)
+    if not part:IsA("BasePart") then return end
+    if isCharacterPart(part) then return end
+    if isCorpsePart(part) then return end
+    if isAlreadyTouched(part) then return end
+
+    -- Snapshot everything we're about to change
+    AR2_wallbangSaved[part] = {
+        groupId    = part.CollisionGroupId,
+        canCollide = part.CanCollide,
+        canQuery   = part.CanQuery,
+    }
+
+    -- 1. Collision group reset
+    if AR2_WALLBANG_GROUPS[part.CollisionGroupId] then
+        pcall(function() part.CollisionGroupId = 0 end)
+    end
+
+    -- 2. Tag the part
+    if not AR2_CollectionService:HasTag(part, "Bullets Penetrate") then
+        pcall(function() AR2_CollectionService:AddTag(part, "Bullets Penetrate") end)
+    end
+
+    -- 3 & 4. Kill collision + query on walls/roofs/railings (above ground)
+    --        Keep ground parts solid under your feet so you don't fall through
+    local isAboveGround = part.Position.Y > 5
+    if isAboveGround then
+        if part.CanCollide then
+            pcall(function() part.CanCollide = false end)
+        end
+        if part.CanQuery then
+            pcall(function() part.CanQuery = false end)
+        end
+    else
+        -- Ground / floor — only remove collision barrier, keep query
+        -- so we don't break AI pathing and interaction system
+        if part.CanCollide and AR2_WALLBANG_GROUPS[part.CollisionGroupId] then
+            pcall(function() part.CanCollide = false end)
+        end
+    end
+end
+
+local function removeWallbangFromPart(part, saved)
+    if not part or not part.Parent then return end
+    pcall(function()
+        part.CollisionGroupId = saved.groupId
+        part.CanCollide       = saved.canCollide
+        part.CanQuery         = saved.canQuery
+    end)
+    pcall(function()
+        if AR2_CollectionService:HasTag(part, "Bullets Penetrate") then
+            AR2_CollectionService:RemoveTag(part, "Bullets Penetrate")
+        end
+    end)
+end
+
+-- bulletCastLightFilter hook — the final say on "is this penetrable?"
+local function AR2_findRaycasting()
+    local rs     = AR2_ReplicatedStorage
+    local client = rs:FindFirstChild("Client")
+    local libs   = client and client:FindFirstChild("Libraries")
+    local rc     = libs and libs:FindFirstChild("Raycasting")
+    if rc then
+        local ok, mod = pcall(require, rc)
+        if ok and type(mod) == "table" and type(mod.bulletCastLightFilter) == "function" then
+            return mod
+        end
+    end
+    local ok2, fw = pcall(function()
+        return require(AR2_ReplicatedFirst:WaitForChild("Framework", 30))
+    end)
+    if ok2 and fw and fw.Libraries and fw.Libraries.Raycasting
+    and type(fw.Libraries.Raycasting.bulletCastLightFilter) == "function" then
+        return fw.Libraries.Raycasting
+    end
+    return nil
+end
+
+local function AR2_installWallbangFilterHook()
+    if AR2_wallbangFilterHooked then return end
+    if type(hookfunction) ~= "function" then return end
+    local Raycasting = AR2_findRaycasting()
+    if not Raycasting then return end
+    AR2_wallbangRealFilter = hookfunction(Raycasting.bulletCastLightFilter,
+        function(instance, ...)
+            if AR2_CFG.weapon.wallbang then
+                if isCharacterPart(instance) then return false end
+                return true
+            end
+            return AR2_wallbangRealFilter(instance, ...)
+        end)
+    AR2_wallbangFilterHooked = true
+    print("[wallbang] bulletCastLightFilter hook installed")
+end
+
+-- Public toggle — flips every layer at once
+function startWallbangTagging()
+    AR2_installWallbangFilterHook()
+    if AR2_wallbangTagConn then return end
+
+    -- Initial full sweep
+    for _, part in ipairs(AR2_Workspace:GetDescendants()) do
+        applyWallbangToPart(part)
+    end
+    local mapFolder = AR2_Workspace:FindFirstChild("Map")
+    if mapFolder then
+        for _, desc in ipairs(mapFolder:GetDescendants()) do
+            applyWallbangToPart(desc)
+        end
+    end
+
+    -- Continuous sweep — every new BasePart gets tagged instantly
+    AR2_wallbangTagConn = AR2_Workspace.DescendantAdded:Connect(function(desc)
+        if not AR2_CFG.weapon.wallbang then return end
+        if desc:IsA("BasePart") then
+            applyWallbangToPart(desc)
+        end
+    end)
+
+    -- Periodic re-sweep every 5 seconds in case the game resets properties
+    if not AR2_wallbangScanConn then
+        AR2_wallbangScanConn = task.spawn(function()
+            while AR2_CFG.weapon.wallbang do
+                task.wait(5)
+                if not AR2_CFG.weapon.wallbang then break end
+                -- Re-check only the parts we already touched — if the game
+                -- reverted any property, re-apply it
+                for part, saved in pairs(AR2_wallbangSaved) do
+                    if part and part.Parent then
+                        if saved.canQuery and part.CanQuery ~= false and part.Position.Y > 5 then
+                            pcall(function() part.CanQuery = false end)
+                        end
+                        if saved.canCollide and part.CanCollide ~= false then
+                            pcall(function() part.CanCollide = false end)
+                        end
+                        if AR2_WALLBANG_GROUPS[saved.groupId] and part.CollisionGroupId ~= 0 then
+                            pcall(function() part.CollisionGroupId = 0 end)
+                        end
+                        if not AR2_CollectionService:HasTag(part, "Bullets Penetrate") then
+                            pcall(function() AR2_CollectionService:AddTag(part, "Bullets Penetrate") end)
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    print(string.format("[wallbang] tagging active — %d parts modified so far",
+        (function() local n = 0 for _ in pairs(AR2_wallbangSaved) do n = n + 1 end return n end)()))
+end
+
+function stopWallbangTagging()
+    if AR2_wallbangTagConn then
+        AR2_wallbangTagConn:Disconnect()
+        AR2_wallbangTagConn = nil
+    end
+    -- The scan loop exits on its own when wallbang turns off
+    for part, saved in pairs(AR2_wallbangSaved) do
+        removeWallbangFromPart(part, saved)
+    end
+    AR2_wallbangSaved = {}
+    print("[wallbang] tagging disabled — all parts restored")
+end
+
+function AR2_setWallbang(enabled)
+    AR2_CFG.weapon.wallbang = enabled
+    if enabled then
+        startWallbangTagging()
+    else
+        stopWallbangTagging()
+    end
+end
